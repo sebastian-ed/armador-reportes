@@ -1,6 +1,7 @@
-import { supabase } from './supabase-config.js';
+import { supabase, supabaseConfigError } from './supabase-config.js';
 
 const state = {
+  configOk: !!supabase,
   session: null,
   profile: null,
   reports: [],
@@ -68,6 +69,31 @@ const viewMeta = {
   admin: ['Admin', 'Gestión básica de usuarios y parámetros de despliegue.'],
   profile: ['Mi cuenta', 'Perfil, seguridad y administración personal.'],
 };
+
+
+function ensureSupabaseReady() {
+  if (supabase) return true;
+  showToast(supabaseConfigError || 'Falta configurar Supabase.', true);
+  return false;
+}
+
+function renderConfigError() {
+  if (supabase) return;
+  const card = document.createElement('article');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="card-head">
+      <h3>Configuración incompleta de Supabase</h3>
+      <p>La app no puede inicializar la conexión.</p>
+    </div>
+    <div class="summary-box">
+      <p><strong>Error detectado:</strong> ${escapeHtml(supabaseConfigError || 'Configuración inválida.')}</p>
+      <p>Revisá <code>supabase-config.js</code> y confirmá que la URL quede con este formato: <code>https://TU-PROYECTO.supabase.co</code>.</p>
+      <p>La anon key debe ser la clave pública del proyecto, sin comillas rotas, sin espacios y sin saltos de línea.</p>
+    </div>
+  `;
+  els.authView.prepend(card);
+}
 
 function showToast(message, isError = false) {
   els.toast.textContent = message;
@@ -261,6 +287,7 @@ function bindEvents() {
 }
 
 async function handleLogin(event) {
+  if (!ensureSupabaseReady()) return;
   event.preventDefault();
   const form = event.currentTarget;
   const submitBtn = form.querySelector('button[type="submit"]');
@@ -282,6 +309,7 @@ async function handleLogin(event) {
 }
 
 async function handleSignup(event) {
+  if (!ensureSupabaseReady()) return;
   event.preventDefault();
   const form = event.currentTarget;
   const submitBtn = form.querySelector('button[type="submit"]');
@@ -406,6 +434,7 @@ function refreshDataViews() {
 }
 
 async function handleReportSubmit(event) {
+  if (!ensureSupabaseReady()) return;
   event.preventDefault();
   if (!state.session?.user) return showToast('Necesitás iniciar sesión.', true);
 
@@ -444,6 +473,7 @@ async function handleReportSubmit(event) {
 }
 
 async function handlePasswordUpdate(event) {
+  if (!ensureSupabaseReady()) return;
   event.preventDefault();
   const form = event.currentTarget;
   const submitBtn = form.querySelector('button[type="submit"]');
@@ -464,6 +494,7 @@ async function handlePasswordUpdate(event) {
 }
 
 async function handleLogout() {
+  if (!ensureSupabaseReady()) return;
   const button = els.logoutBtn;
   try {
     setButtonLoading(button, true, 'Cerrando...');
@@ -478,6 +509,7 @@ async function handleLogout() {
 }
 
 async function loadAppData() {
+  if (!ensureSupabaseReady()) return;
   if (!state.session?.user) return;
 
   const reportsQuery = supabase
@@ -782,6 +814,7 @@ function closeLightbox() {
 }
 
 async function handleEditReportSubmit(event) {
+  if (!ensureSupabaseReady()) return;
   event.preventDefault();
   const form = event.currentTarget;
   const submitBtn = form.querySelector('button[type="submit"]');
@@ -810,6 +843,7 @@ async function handleEditReportSubmit(event) {
 }
 
 async function handleDeleteReport(reportId, button) {
+  if (!ensureSupabaseReady()) return;
   const report = state.reports.find((item) => item.id === reportId);
   if (!report) return showToast('No se encontró el reporte.', true);
 

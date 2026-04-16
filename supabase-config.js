@@ -1,16 +1,45 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
-const SUPABASE_URL = 'https://jwgrwnogsgdqqmfpqhwj.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ';
+const CONFIG = {
+  url: 'https://jwgrwnogsgdqqmfpqhwj.supabase.co',
+  anonKey: 'sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ',
+};
 
-if (SUPABASE_URL.includes('https://jwgrwnogsgdqqmfpqhwj.supabase.co') || SUPABASE_ANON_KEY.includes('sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ')) {
-  console.warn('Configurá SUPABASE_URL y SUPABASE_ANON_KEY en supabase-config.js antes de usar la app.');
+function clean(value) {
+  return String(value || '').trim();
 }
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-  },
-});
+function isPlaceholder(value) {
+  return !value || value.includes('REEMPLAZAR_CON_');
+}
+
+function isValidHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+const resolvedUrl = clean(globalThis.SUPABASE_URL || localStorage.getItem('SUPABASE_URL') || CONFIG.url);
+const resolvedAnonKey = clean(globalThis.SUPABASE_ANON_KEY || localStorage.getItem('SUPABASE_ANON_KEY') || CONFIG.anonKey);
+
+export let supabase = null;
+export let supabaseConfigError = '';
+
+if (isPlaceholder(resolvedUrl) || isPlaceholder(resolvedAnonKey)) {
+  supabaseConfigError = 'Configurá SUPABASE_URL y SUPABASE_ANON_KEY en supabase-config.js antes de usar la app.';
+  console.error(supabaseConfigError);
+} else if (!isValidHttpUrl(resolvedUrl)) {
+  supabaseConfigError = `La SUPABASE_URL no es válida: "${resolvedUrl}". Debe empezar con http:// o https://.`;
+  console.error(supabaseConfigError);
+} else {
+  supabase = createClient(resolvedUrl, resolvedAnonKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    },
+  });
+}
