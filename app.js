@@ -65,7 +65,7 @@ const els = {
   toast: document.getElementById('toast'),
 };
 
-const MAX_UPLOAD_FILES = 4;
+const MAX_UPLOAD_FILES = 10;
 const IMAGE_COMPRESSION_THRESHOLD = 180 * 1024;
 const DESKTOP_IMAGE_MAX_DIMENSION = 1280;
 const MOBILE_IMAGE_MAX_DIMENSION = 900;
