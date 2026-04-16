@@ -62,9 +62,9 @@ const els = {
 };
 
 
-const IMAGE_COMPRESSION_THRESHOLD = 1.2 * 1024 * 1024;
-const IMAGE_MAX_DIMENSION = 1600;
-const IMAGE_JPEG_QUALITY = 0.78;
+const IMAGE_COMPRESSION_THRESHOLD = 450 * 1024;
+const IMAGE_MAX_DIMENSION = 1280;
+const IMAGE_JPEG_QUALITY = 0.72;
 
 const viewMeta = {
   auth: ['Acceso', 'Ingresá o creá tu cuenta para operar la plataforma.'],
@@ -135,24 +135,11 @@ function hideUploadProgress() {
   if (bar) bar.classList.add('hidden');
 }
 
-
 function withTimeout(promise, ms, message) {
-  let timer;
   return Promise.race([
-    promise.finally(() => clearTimeout(timer)),
-    new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), ms);
-    }),
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
   ]);
-}
-
-function buildOptimisticReport(payload) {
-  return {
-    ...payload,
-    report_photos: [],
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
 }
 
 function formatDate(value) {
@@ -536,25 +523,25 @@ async function uploadSingleFile(reportId, file, retries = 3) {
   throw lastError;
 }
 
-async function uploadReportFiles(reportId, files = state.pendingFiles, onProgress = null) {
+async function uploadReportFilesSequential(reportId, files = state.pendingFiles, onProgress = null) {
   if (!files.length) return [];
 
   const uploads = [];
   for (let index = 0; index < files.length; index += 1) {
     const file = files[index];
-    const result = await withTimeout(
+    const uploaded = await withTimeout(
       uploadSingleFile(reportId, file),
-      45000,
+      90000,
       `La foto ${index + 1} tardó demasiado en subirse.`
     );
-    uploads.push(result);
+    uploads.push(uploaded);
     if (onProgress) onProgress(index + 1, files.length);
   }
 
   const { error: photosError } = await withTimeout(
     supabase.from('report_photos').insert(uploads),
-    20000,
-    'La vinculación de fotos tardó demasiado.'
+    30000,
+    'No se pudo vincular las fotos al reporte.'
   );
   if (photosError) throw photosError;
   return uploads;
@@ -563,22 +550,26 @@ async function uploadReportFiles(reportId, files = state.pendingFiles, onProgres
 async function uploadReportFilesInBackground(reportId, files = []) {
   if (!files.length) return;
 
-  showUploadProgress(0, files.length);
   try {
-    await uploadReportFiles(reportId, files, (done, total) => {
+    showUploadProgress(0, files.length);
+    const uploads = await uploadReportFilesSequential(reportId, files, (done, total) => {
       showUploadProgress(done, total);
     });
 
-    const fullReport = await withTimeout(
-      fetchSingleReport(reportId),
-      20000,
-      'El refresco final del reporte tardó demasiado.'
-    );
-    upsertReportInState(fullReport);
-    refreshDataViews();
-    showToast('Reporte y fotos guardados correctamente.');
+    const report = state.reports.find((item) => item.id === reportId);
+    if (report) {
+      report.report_photos = [...(report.report_photos || []), ...uploads];
+      report.updated_at = new Date().toISOString();
+      refreshDataViews();
+    } else {
+      const fullReport = await fetchSingleReport(reportId);
+      upsertReportInState(fullReport);
+      refreshDataViews();
+    }
+
+    showToast('Reporte guardado y fotos cargadas correctamente.');
   } catch (error) {
-    showToast(`Reporte guardado. Las fotos no terminaron de subirse: ${error.message}`, true);
+    showToast(`Reporte guardado. Las fotos no se terminaron de subir: ${error.message}`, true);
   } finally {
     hideUploadProgress();
   }
@@ -630,7 +621,10 @@ async function handleReportSubmit(event) {
   const submitBtn = form.querySelector('button[type="submit"]');
   const formData = new FormData(form);
   const payload = Object.fromEntries(formData.entries());
-  payload.id = crypto.randomUUID();
+  const pendingFiles = [...state.pendingFiles];
+  const reportId = crypto.randomUUID();
+
+  payload.id = reportId;
   payload.user_id = state.session.user.id;
   payload.supervisor_id = state.session.user.id;
   payload.supervisor_name = state.profile?.full_name || payload.supervisor_name;
@@ -638,15 +632,18 @@ async function handleReportSubmit(event) {
   payload.observations = String(payload.observations || '').trim();
 
   try {
-    const pendingFiles = [...state.pendingFiles];
     setButtonLoading(submitBtn, true, 'Guardando reporte...');
 
-    const { error } = await supabase.from('reports').insert(payload);
+    const { data, error } = await supabase.from('reports').insert(payload).select().single();
     if (error) throw error;
 
-    const optimisticReport = buildOptimisticReport(payload);
+    const optimisticReport = {
+      ...data,
+      report_photos: [],
+    };
     upsertReportInState(optimisticReport);
     refreshDataViews();
+
     resetReportForm();
     setView('reports');
     showToast(
@@ -654,16 +651,15 @@ async function handleReportSubmit(event) {
         ? 'Reporte guardado. Las fotos se subirán en segundo plano.'
         : 'Reporte guardado correctamente.'
     );
-
-    if (pendingFiles.length) {
-      queueMicrotask(() => {
-        uploadReportFilesInBackground(payload.id, pendingFiles);
-      });
-    }
   } catch (error) {
     showToast(error.message, true);
+    return;
   } finally {
     setButtonLoading(submitBtn, false);
+  }
+
+  if (pendingFiles.length) {
+    void uploadReportFilesInBackground(reportId, pendingFiles);
   }
 }
 
