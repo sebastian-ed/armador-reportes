@@ -350,12 +350,78 @@ async function handleSignup(event) {
   }
 }
 
-function handleFilesSelected(event) {
+async function handleFilesSelected(event) {
   const files = [...event.target.files];
   if (!files.length) return;
-  state.pendingFiles = [...state.pendingFiles, ...files];
-  renderPhotoPreview();
-  event.target.value = '';
+
+  const input = event.target;
+  input.disabled = true;
+
+  try {
+    const processedFiles = [];
+    for (const file of files) {
+      processedFiles.push(await prepareUploadFile(file));
+    }
+    state.pendingFiles = [...state.pendingFiles, ...processedFiles];
+    renderPhotoPreview();
+    showToast(processedFiles.length === 1 ? 'Foto lista para adjuntar.' : 'Fotos listas para adjuntar.');
+  } catch (error) {
+    showToast(`No se pudieron preparar las fotos: ${error.message}`, true);
+  } finally {
+    input.disabled = false;
+    input.value = '';
+  }
+}
+
+async function prepareUploadFile(file) {
+  const isImage = String(file.type || '').startsWith('image/');
+  if (!isImage) return file;
+  if (file.size <= IMAGE_COMPRESSION_THRESHOLD) return file;
+
+  try {
+    return await compressImageFile(file);
+  } catch (error) {
+    console.warn('No se pudo comprimir la imagen. Se sube el original.', error);
+    return file;
+  }
+}
+
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('No se pudo leer la imagen.'));
+    };
+    img.src = url;
+  });
+}
+
+async function compressImageFile(file) {
+  const img = await loadImageFromFile(file);
+  const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(img.width, img.height));
+  const width = Math.max(1, Math.round(img.width * scale));
+  const height = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  ctx.drawImage(img, 0, 0, width, height);
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob((result) => {
+      if (result) resolve(result);
+      else reject(new Error('No se pudo generar la compresión de la foto.'));
+    }, 'image/jpeg', IMAGE_JPEG_QUALITY);
+  });
+
+  const compressedName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+  return new File([blob], compressedName, { type: 'image/jpeg', lastModified: Date.now() });
 }
 
 function renderPhotoPreview() {
@@ -462,28 +528,28 @@ async function handleReportSubmit(event) {
     const { data, error } = await supabase.from('reports').insert(payload).select().single();
     if (error) throw error;
 
-    const fullReport = await fetchSingleReport(data.id);
-    upsertReportInState(fullReport);
+    const optimisticReport = { ...data, report_photos: [] };
+    upsertReportInState(optimisticReport);
     resetReportForm();
     refreshDataViews();
     setView('reports');
     showToast(pendingFiles.length
-      ? 'Reporte guardado. Se están cargando las fotos en segundo plano.'
+      ? 'Reporte guardado. Las fotos se están procesando en segundo plano.'
       : 'Reporte guardado correctamente.');
 
-    if (pendingFiles.length) {
-      void (async () => {
-        try {
+    void (async () => {
+      try {
+        if (pendingFiles.length) {
           await uploadReportFiles(data.id, pendingFiles);
-          const updatedReport = await fetchSingleReport(data.id);
-          upsertReportInState(updatedReport);
-          refreshDataViews();
           showToast('Fotos cargadas correctamente.');
-        } catch (uploadError) {
-          showToast(`El reporte se guardó, pero falló la carga de fotos: ${uploadError.message}`, true);
         }
-      })();
-    }
+        const updatedReport = await fetchSingleReport(data.id);
+        upsertReportInState(updatedReport);
+        refreshDataViews();
+      } catch (uploadError) {
+        showToast(`El reporte se guardó, pero falló la carga de fotos: ${uploadError.message}`, true);
+      }
+    })();
   } catch (error) {
     showToast(error.message, true);
   } finally {
