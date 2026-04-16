@@ -62,9 +62,13 @@ const els = {
 };
 
 
-const IMAGE_COMPRESSION_THRESHOLD = 450 * 1024;
+const IMAGE_COMPRESSION_THRESHOLD = 0;
 const IMAGE_MAX_DIMENSION = 1280;
-const IMAGE_JPEG_QUALITY = 0.72;
+const MOBILE_IMAGE_MAX_DIMENSION = 960;
+const IMAGE_JPEG_QUALITY = 0.6;
+const MOBILE_IMAGE_JPEG_QUALITY = 0.52;
+const TARGET_IMAGE_BYTES = 450 * 1024;
+const TARGET_MOBILE_IMAGE_BYTES = 280 * 1024;
 
 const viewMeta = {
   auth: ['Acceso', 'Ingresá o creá tu cuenta para operar la plataforma.'],
@@ -394,73 +398,115 @@ async function handleFilesSelected(event) {
   const files = [...(input.files || [])];
   if (!files.length) return;
 
-  showToast(`Preparando ${files.length} foto${files.length !== 1 ? 's' : ''}...`);
+  const aggressive = input.id === 'cameraInput' || isProbablyMobileDevice();
+  showToast(`Optimizando ${files.length} foto${files.length !== 1 ? 's' : ''} para carga móvil...`);
 
   try {
     const preparedFiles = await Promise.race([
-      prepareSelectedFiles(files),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000)),
+      prepareSelectedFiles(files, { aggressive }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000)),
     ]);
     state.pendingFiles = [...state.pendingFiles, ...preparedFiles];
+    showToast(`${preparedFiles.length} foto${preparedFiles.length !== 1 ? 's' : ''} lista${preparedFiles.length !== 1 ? 's' : ''} para subir.`);
   } catch (prepError) {
-    // Si la compresion se cuelga, usar los archivos originales sin modificar
-    state.pendingFiles = [...state.pendingFiles, ...files];
+    showToast('No se pudieron preparar las fotos. Probá con menos imágenes o una toma más liviana.', true);
   } finally {
     input.value = '';
     renderPhotoPreview();
   }
 }
 
-async function prepareSelectedFiles(files) {
-  return Promise.all(
-    files.map((file) =>
-      file.type && file.type.startsWith('image/')
-        ? optimizeImageFile(file)
-        : Promise.resolve(file)
-    )
-  );
+function isProbablyMobileDevice() {
+  return window.matchMedia('(max-width: 760px)').matches || navigator.maxTouchPoints > 0;
 }
 
-async function optimizeImageFile(file) {
-  const needsCompression = file.size > IMAGE_COMPRESSION_THRESHOLD;
+async function prepareSelectedFiles(files, options = {}) {
+  const prepared = [];
+  for (const file of files) {
+    if (file.type && file.type.startsWith('image/')) {
+      prepared.push(await optimizeImageFile(file, options));
+    } else {
+      prepared.push(file);
+    }
+  }
+  return prepared;
+}
+
+async function optimizeImageFile(file, options = {}) {
+  const aggressive = !!options.aggressive;
+  const targetMaxDimension = aggressive ? MOBILE_IMAGE_MAX_DIMENSION : IMAGE_MAX_DIMENSION;
+  const startQuality = aggressive ? MOBILE_IMAGE_JPEG_QUALITY : IMAGE_JPEG_QUALITY;
+  const targetBytes = aggressive ? TARGET_MOBILE_IMAGE_BYTES : TARGET_IMAGE_BYTES;
+  const needsCompression = aggressive || file.size > IMAGE_COMPRESSION_THRESHOLD;
   if (!needsCompression) return file;
 
   try {
     const image = await Promise.race([
-      loadImageElement(file),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+      loadImageSource(file),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000)),
     ]);
 
-    const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
-    const targetWidth = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
-    const targetHeight = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+    let width = image.width || image.naturalWidth;
+    let height = image.height || image.naturalHeight;
+    if (!width || !height) return file;
+
+    const initialScale = Math.min(1, targetMaxDimension / Math.max(width, height));
+    width = Math.max(1, Math.round(width * initialScale));
+    height = Math.max(1, Math.round(height * initialScale));
 
     const canvas = document.createElement('canvas');
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return file;
-    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
 
-    const blob = await Promise.race([
-      new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', IMAGE_JPEG_QUALITY)),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
-    ]);
+    let quality = startQuality;
+    let bestBlob = null;
 
-    if (!blob || blob.size >= file.size) return file;
+    for (let pass = 0; pass < 4; pass += 1) {
+      canvas.width = width;
+      canvas.height = height;
+      ctx.clearRect(0, 0, width, height);
+      ctx.drawImage(image, 0, 0, width, height);
+
+      const blob = await Promise.race([
+        new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000)),
+      ]);
+
+      if (blob) {
+        bestBlob = blob;
+        if (blob.size <= targetBytes) break;
+      }
+
+      quality = Math.max(0.4, quality - 0.08);
+      width = Math.max(640, Math.round(width * 0.82));
+      height = Math.max(640, Math.round(height * 0.82));
+    }
+
+    if (!bestBlob) return file;
 
     const baseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
-    return new File([blob], `${baseName}.jpg`, {
+    return new File([bestBlob], `${baseName}.jpg`, {
       type: 'image/jpeg',
       lastModified: Date.now(),
     });
   } catch {
-    // Si falla o se cuelga la compresion, subir el original sin modificar
+    if (aggressive && file.size > 2 * 1024 * 1024) {
+      throw new Error('La foto es demasiado pesada para procesarla en el celular.');
+    }
     return file;
   }
 }
 
-async function loadImageElement(file) {
+async function loadImageSource(file) {
+  if ('createImageBitmap' in window) {
+    try {
+      const bitmap = await createImageBitmap(file);
+      return bitmap;
+    } catch {
+      // fallback below
+    }
+  }
+
   const objectUrl = URL.createObjectURL(file);
   try {
     return await new Promise((resolve, reject) => {
@@ -474,6 +520,12 @@ async function loadImageElement(file) {
   }
 }
 
+function formatFileSize(bytes = 0) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 function renderPhotoPreview() {
   if (!state.pendingFiles.length) {
     els.photoPreview.innerHTML = '';
@@ -484,8 +536,9 @@ function renderPhotoPreview() {
     const url = URL.createObjectURL(file);
     return `
       <article class="photo-item">
-        <img src="${url}" alt="Vista previa ${index + 1}" />
+        <img src="${url}" alt="Vista previa ${index + 1}" onload="URL.revokeObjectURL(this.src)" />
         <span>${escapeHtml(file.name)}</span>
+        <small class="photo-item-meta">${formatFileSize(file.size)}</small>
       </article>
     `;
   }).join('');
@@ -531,7 +584,7 @@ async function uploadReportFilesSequential(reportId, files = state.pendingFiles,
     const file = files[index];
     const uploaded = await withTimeout(
       uploadSingleFile(reportId, file),
-      90000,
+      45000,
       `La foto ${index + 1} tardó demasiado en subirse.`
     );
     uploads.push(uploaded);
@@ -648,7 +701,7 @@ async function handleReportSubmit(event) {
     setView('reports');
     showToast(
       pendingFiles.length
-        ? 'Reporte guardado. Las fotos se subirán en segundo plano.'
+        ? 'Reporte guardado. Las fotos optimizadas se subirán en segundo plano.'
         : 'Reporte guardado correctamente.'
     );
   } catch (error) {
