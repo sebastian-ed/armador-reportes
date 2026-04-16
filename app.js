@@ -62,30 +62,14 @@ const els = {
   toast: document.getElementById('toast'),
 };
 
-
-const IMAGE_COMPRESSION_THRESHOLD = 0;
+const MAX_UPLOAD_FILES = 6;
+const IMAGE_COMPRESSION_THRESHOLD = 250 * 1024;
 const DESKTOP_IMAGE_MAX_DIMENSION = 1280;
 const MOBILE_IMAGE_MAX_DIMENSION = 960;
-const DESKTOP_IMAGE_JPEG_QUALITY = 0.6;
-const MOBILE_IMAGE_JPEG_QUALITY = 0.52;
+const DESKTOP_IMAGE_JPEG_QUALITY = 0.68;
+const MOBILE_IMAGE_JPEG_QUALITY = 0.55;
 const DESKTOP_IMAGE_TARGET_SIZE = 450 * 1024;
 const MOBILE_IMAGE_TARGET_SIZE = 280 * 1024;
-
-
-function isMobileDevice() {
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || window.innerWidth <= 820;
-}
-
-function getImageOptimizationProfile(file = null) {
-  const source = file?.__source || '';
-  const fromCamera = source === 'camera';
-  const mobile = isMobileDevice() || fromCamera;
-  return {
-    maxDimension: mobile ? MOBILE_IMAGE_MAX_DIMENSION : DESKTOP_IMAGE_MAX_DIMENSION,
-    quality: mobile ? MOBILE_IMAGE_JPEG_QUALITY : DESKTOP_IMAGE_JPEG_QUALITY,
-    targetSize: mobile ? MOBILE_IMAGE_TARGET_SIZE : DESKTOP_IMAGE_TARGET_SIZE,
-  };
-}
 
 const viewMeta = {
   auth: ['Acceso', 'Ingresá o creá tu cuenta para operar la plataforma.'],
@@ -96,6 +80,19 @@ const viewMeta = {
   profile: ['Mi cuenta', 'Perfil, seguridad y administración personal.'],
 };
 
+function isMobileDevice() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || window.innerWidth <= 820;
+}
+
+function getImageOptimizationProfile(file = null) {
+  const source = file?.__source || '';
+  const mobile = isMobileDevice() || source === 'camera';
+  return {
+    maxDimension: mobile ? MOBILE_IMAGE_MAX_DIMENSION : DESKTOP_IMAGE_MAX_DIMENSION,
+    quality: mobile ? MOBILE_IMAGE_JPEG_QUALITY : DESKTOP_IMAGE_JPEG_QUALITY,
+    targetSize: mobile ? MOBILE_IMAGE_TARGET_SIZE : DESKTOP_IMAGE_TARGET_SIZE,
+  };
+}
 
 function ensureSupabaseReady() {
   if (isSupabaseConfigured && supabase && !supabase.__isStub) return true;
@@ -122,6 +119,7 @@ function renderConfigError() {
 }
 
 function showToast(message, isError = false) {
+  if (!els.toast) return;
   els.toast.textContent = message;
   els.toast.classList.remove('hidden');
   els.toast.style.background = isError ? '#7f1d1d' : '#0f172a';
@@ -257,11 +255,13 @@ async function ensureProfile(user, meta = null) {
   const role = meta?.role || user.user_metadata?.role || 'supervisor';
   const fullName = meta?.full_name || user.user_metadata?.full_name || user.email;
 
-  const { data: existing } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from('profiles')
     .select('*')
     .eq('id', user.id)
     .maybeSingle();
+
+  if (existingError) throw existingError;
 
   if (existing) {
     state.profile = existing;
@@ -291,34 +291,40 @@ async function bootstrap() {
     return;
   }
 
-  const { data, error } = await supabase.auth.getSession();
-  if (error) {
-    showToast(error.message, true);
-    return;
-  }
+  try {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
 
-  state.session = data.session;
-  if (state.session?.user) {
-    await ensureProfile(state.session.user);
-    hydrateSessionUI();
-    await loadAppData();
-    setView('dashboard');
-  } else {
-    hydrateSessionUI();
-  }
-
-  supabase.auth.onAuthStateChange(async (_event, session) => {
-    state.session = session;
-    if (session?.user) {
-      await ensureProfile(session.user);
+    state.session = data.session;
+    if (state.session?.user) {
+      await ensureProfile(state.session.user);
       hydrateSessionUI();
       await loadAppData();
       setView('dashboard');
     } else {
-      state.profile = null;
-      state.reports = [];
-      state.profiles = [];
       hydrateSessionUI();
+    }
+  } catch (error) {
+    showToast(error.message || 'No se pudo iniciar la app.', true);
+    hydrateSessionUI();
+  }
+
+  supabase.auth.onAuthStateChange(async (_event, session) => {
+    try {
+      state.session = session;
+      if (session?.user) {
+        await ensureProfile(session.user);
+        hydrateSessionUI();
+        await loadAppData();
+        setView('dashboard');
+      } else {
+        state.profile = null;
+        state.reports = [];
+        state.profiles = [];
+        hydrateSessionUI();
+      }
+    } catch (error) {
+      showToast(error.message || 'No se pudo actualizar la sesión.', true);
     }
   });
 }
@@ -333,25 +339,25 @@ function bindEvents() {
     setView(requested);
   }));
 
-  els.loginForm.addEventListener('submit', handleLogin);
-  els.signupForm.addEventListener('submit', handleSignup);
-  els.reportForm.addEventListener('submit', handleReportSubmit);
-  els.passwordForm.addEventListener('submit', handlePasswordUpdate);
-  els.editReportForm.addEventListener('submit', handleEditReportSubmit);
-  els.logoutBtn.addEventListener('click', handleLogout);
-  els.refreshDataBtn.addEventListener('click', loadAppData);
-  els.photoInput.addEventListener('change', handleFilesSelected);
-  els.cameraInput.addEventListener('change', handleFilesSelected);
-  els.filterFrom.addEventListener('input', renderReportsTable);
-  els.filterTo.addEventListener('input', renderReportsTable);
-  els.filterSupervisor.addEventListener('change', renderReportsTable);
-  els.filterSearch.addEventListener('input', renderReportsTable);
-  els.exportCsvBtn.addEventListener('click', exportReportsCsv);
-  els.exportJsonBtn.addEventListener('click', exportReportsJson);
-  els.closeEditModalBtn.addEventListener('click', closeEditModal);
-  els.cancelEditModalBtn.addEventListener('click', closeEditModal);
-  els.closeLightboxBtn.addEventListener('click', closeLightbox);
-  els.reportsTableWrap.addEventListener('click', handleReportsActionClick);
+  els.loginForm?.addEventListener('submit', handleLogin);
+  els.signupForm?.addEventListener('submit', handleSignup);
+  els.reportForm?.addEventListener('submit', handleReportSubmit);
+  els.passwordForm?.addEventListener('submit', handlePasswordUpdate);
+  els.editReportForm?.addEventListener('submit', handleEditReportSubmit);
+  els.logoutBtn?.addEventListener('click', handleLogout);
+  els.refreshDataBtn?.addEventListener('click', loadAppData);
+  els.photoInput?.addEventListener('change', handleFilesSelected);
+  els.cameraInput?.addEventListener('change', handleFilesSelected);
+  els.filterFrom?.addEventListener('input', renderReportsTable);
+  els.filterTo?.addEventListener('input', renderReportsTable);
+  els.filterSupervisor?.addEventListener('change', renderReportsTable);
+  els.filterSearch?.addEventListener('input', renderReportsTable);
+  els.exportCsvBtn?.addEventListener('click', exportReportsCsv);
+  els.exportJsonBtn?.addEventListener('click', exportReportsJson);
+  els.closeEditModalBtn?.addEventListener('click', closeEditModal);
+  els.cancelEditModalBtn?.addEventListener('click', closeEditModal);
+  els.closeLightboxBtn?.addEventListener('click', closeLightbox);
+  els.reportsTableWrap?.addEventListener('click', handleReportsActionClick);
 }
 
 async function handleLogin(event) {
@@ -365,12 +371,16 @@ async function handleLogin(event) {
 
   try {
     setButtonLoading(submitBtn, true, 'Ingresando...');
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error } = await withTimeout(
+      supabase.auth.signInWithPassword({ email, password }),
+      20000,
+      'El ingreso tardó demasiado. Revisá tu conexión e intentá otra vez.'
+    );
     if (error) throw error;
     form.reset();
     showToast('Sesión iniciada correctamente.');
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message || 'No se pudo iniciar sesión.', true);
   } finally {
     setButtonLoading(submitBtn, false);
   }
@@ -383,19 +393,23 @@ async function handleSignup(event) {
   const submitBtn = form.querySelector('button[type="submit"]');
   const formData = new FormData(form);
   const payload = {
-    email: String(formData.get('email')).trim(),
-    password: String(formData.get('password')).trim(),
+    email: String(formData.get('email') || '').trim(),
+    password: String(formData.get('password') || '').trim(),
     options: {
       data: {
-        full_name: String(formData.get('full_name')).trim(),
-        role: String(formData.get('role')).trim(),
+        full_name: String(formData.get('full_name') || '').trim(),
+        role: String(formData.get('role') || 'supervisor').trim(),
       },
     },
   };
 
   try {
     setButtonLoading(submitBtn, true, 'Creando...');
-    const { data, error } = await supabase.auth.signUp(payload);
+    const { data, error } = await withTimeout(
+      supabase.auth.signUp(payload),
+      20000,
+      'La creación de la cuenta tardó demasiado. Intentá de nuevo.'
+    );
     if (error) throw error;
 
     form.reset();
@@ -404,7 +418,7 @@ async function handleSignup(event) {
       ? 'Cuenta creada. Revisá el email para confirmar el acceso.'
       : 'Cuenta creada correctamente. Ya podés ingresar.');
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message || 'No se pudo crear la cuenta.', true);
   } finally {
     setButtonLoading(submitBtn, false);
   }
@@ -415,8 +429,15 @@ async function handleFilesSelected(event) {
   const files = [...(input.files || [])];
   if (!files.length) return;
 
+  const availableSlots = Math.max(0, MAX_UPLOAD_FILES - state.pendingFiles.length);
+  if (!availableSlots) {
+    input.value = '';
+    showToast(`Máximo ${MAX_UPLOAD_FILES} fotos por reporte.`, true);
+    return;
+  }
+
   const source = input.id === 'cameraInput' ? 'camera' : 'gallery';
-  const taggedFiles = files.slice(0, MAX_UPLOAD_FILES).map((file) => {
+  const acceptedFiles = files.slice(0, availableSlots).map((file) => {
     try {
       Object.defineProperty(file, '__source', { value: source, configurable: true });
     } catch {
@@ -425,48 +446,34 @@ async function handleFilesSelected(event) {
     return file;
   });
 
-  if (files.length > MAX_UPLOAD_FILES) {
-    showToast(`Se tomarán solo ${MAX_UPLOAD_FILES} fotos por reporte para evitar demoras.`, true);
+  if (files.length > availableSlots) {
+    showToast(`Se tomarán solo ${acceptedFiles.length} foto${acceptedFiles.length !== 1 ? 's' : ''} para evitar demoras.`, true);
   } else {
-    showToast(`${taggedFiles.length} foto${taggedFiles.length !== 1 ? 's' : ''} listas para subir.`);
+    showToast(`${acceptedFiles.length} foto${acceptedFiles.length !== 1 ? 's' : ''} listas para subir.`);
   }
 
-  state.pendingFiles = [...state.pendingFiles, ...taggedFiles].slice(0, MAX_UPLOAD_FILES);
+  state.pendingFiles = [...state.pendingFiles, ...acceptedFiles];
   input.value = '';
   renderPhotoPreview();
 }
 
-async function prepareSelectedFiles(files, options = {}) {
-  const prepared = [];
-  for (const file of files) {
-    if (file.type && file.type.startsWith('image/')) {
-      prepared.push(await optimizeImageFile(file, options));
-    } else {
-      prepared.push(file);
-    }
-  }
-  return prepared;
-}
+async function optimizeImageFile(file) {
+  const profile = getImageOptimizationProfile(file);
+  const needsCompression = file.size > IMAGE_COMPRESSION_THRESHOLD || file.__source === 'camera' || isMobileDevice();
+  if (!needsCompression || !(file.type || '').startsWith('image/')) return file;
 
-async function optimizeImageFile(file, options = {}) {
-  const aggressive = !!options.aggressive;
-  const targetMaxDimension = aggressive ? MOBILE_IMAGE_MAX_DIMENSION : IMAGE_MAX_DIMENSION;
-  const startQuality = aggressive ? MOBILE_IMAGE_JPEG_QUALITY : IMAGE_JPEG_QUALITY;
-  const targetBytes = aggressive ? TARGET_MOBILE_IMAGE_BYTES : TARGET_IMAGE_BYTES;
-  const needsCompression = aggressive || file.size > IMAGE_COMPRESSION_THRESHOLD;
-  if (!needsCompression) return file;
-
+  let imageSource = null;
   try {
-    const image = await Promise.race([
+    imageSource = await Promise.race([
       loadImageSource(file),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000)),
     ]);
 
-    let width = image.width || image.naturalWidth;
-    let height = image.height || image.naturalHeight;
+    let width = imageSource.width || imageSource.naturalWidth;
+    let height = imageSource.height || imageSource.naturalHeight;
     if (!width || !height) return file;
 
-    const initialScale = Math.min(1, targetMaxDimension / Math.max(width, height));
+    const initialScale = Math.min(1, profile.maxDimension / Math.max(width, height));
     width = Math.max(1, Math.round(width * initialScale));
     height = Math.max(1, Math.round(height * initialScale));
 
@@ -474,14 +481,14 @@ async function optimizeImageFile(file, options = {}) {
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return file;
 
-    let quality = startQuality;
+    let quality = profile.quality;
     let bestBlob = null;
 
     for (let pass = 0; pass < 4; pass += 1) {
       canvas.width = width;
       canvas.height = height;
       ctx.clearRect(0, 0, width, height);
-      ctx.drawImage(image, 0, 0, width, height);
+      ctx.drawImage(imageSource, 0, 0, width, height);
 
       const blob = await Promise.race([
         new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality)),
@@ -490,34 +497,40 @@ async function optimizeImageFile(file, options = {}) {
 
       if (blob) {
         bestBlob = blob;
-        if (blob.size <= targetBytes) break;
+        if (blob.size <= profile.targetSize) break;
       }
 
-      quality = Math.max(0.4, quality - 0.08);
+      quality = Math.max(0.42, quality - 0.08);
       width = Math.max(640, Math.round(width * 0.82));
       height = Math.max(640, Math.round(height * 0.82));
     }
 
-    if (!bestBlob) return file;
+    if (!bestBlob || bestBlob.size >= file.size) return file;
 
     const baseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
-    return new File([bestBlob], `${baseName}.jpg`, {
+    const newFile = new File([bestBlob], `${baseName}.jpg`, {
       type: 'image/jpeg',
       lastModified: Date.now(),
     });
-  } catch {
-    if (aggressive && file.size > 2 * 1024 * 1024) {
-      throw new Error('La foto es demasiado pesada para procesarla en el celular.');
+    try {
+      Object.defineProperty(newFile, '__source', { value: file.__source || '', configurable: true });
+    } catch {
+      newFile.__source = file.__source || '';
     }
+    return newFile;
+  } catch {
     return file;
+  } finally {
+    if (imageSource && typeof imageSource.close === 'function') {
+      try { imageSource.close(); } catch {}
+    }
   }
 }
 
 async function loadImageSource(file) {
   if ('createImageBitmap' in window) {
     try {
-      const bitmap = await createImageBitmap(file);
-      return bitmap;
+      return await createImageBitmap(file);
     } catch {
       // fallback below
     }
@@ -536,12 +549,6 @@ async function loadImageSource(file) {
   }
 }
 
-function formatFileSize(bytes = 0) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
-
 function renderPhotoPreview() {
   state.objectUrls.forEach((url) => URL.revokeObjectURL(url));
   state.objectUrls = [];
@@ -554,30 +561,30 @@ function renderPhotoPreview() {
   els.photoPreview.innerHTML = state.pendingFiles.map((file, index) => {
     const url = URL.createObjectURL(file);
     state.objectUrls.push(url);
-    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    const sizeKb = Math.round(file.size / 1024);
     return `
       <article class="photo-item">
         <img src="${url}" alt="Vista previa ${index + 1}" />
-        <span>${escapeHtml(file.name)} · ${sizeMb} MB</span>
+        <span>${escapeHtml(file.name)} · ${sizeKb} KB</span>
       </article>
     `;
   }).join('');
 }
 
-function resetReportForm()() {
+function resetReportForm() {
   state.pendingFiles = [];
   renderPhotoPreview();
   els.reportForm.reset();
   els.reportSupervisorName.value = state.profile?.full_name || state.session?.user?.email || '';
 }
 
-async function uploadSingleFile(reportId, file, retries = 3) {
+async function uploadSingleFile(reportId, file, retries = 2) {
   const preparedFile = await optimizeImageFile(file);
   const ext = (preparedFile.name.split('.').pop() || 'jpg').toLowerCase();
   const path = `${state.session.user.id}/${reportId}/${crypto.randomUUID()}.${ext}`;
 
   let lastError;
-  for (let attempt = 1; attempt <= retries; attempt++) {
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
       const { error } = await supabase.storage.from('report-photos').upload(path, preparedFile, {
         upsert: false,
@@ -586,11 +593,16 @@ async function uploadSingleFile(reportId, file, retries = 3) {
       if (error) throw error;
 
       const { data } = supabase.storage.from('report-photos').getPublicUrl(path);
-      return { report_id: reportId, file_name: preparedFile.name || file.name, storage_path: path, public_url: data.publicUrl };
+      return {
+        report_id: reportId,
+        file_name: preparedFile.name || file.name,
+        storage_path: path,
+        public_url: data.publicUrl,
+      };
     } catch (err) {
       lastError = err;
       if (attempt < retries) {
-        await new Promise((res) => setTimeout(res, 800 * attempt));
+        await new Promise((res) => setTimeout(res, 700 * attempt));
       }
     }
   }
@@ -732,7 +744,7 @@ async function handleReportSubmit(event) {
         : 'Reporte guardado correctamente.'
     );
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message || 'No se pudo guardar el reporte.', true);
     return;
   } finally {
     setButtonLoading(submitBtn, false);
@@ -749,7 +761,7 @@ async function handlePasswordUpdate(event) {
   const form = event.currentTarget;
   const submitBtn = form.querySelector('button[type="submit"]');
   const formData = new FormData(form);
-  const password = String(formData.get('password')).trim();
+  const password = String(formData.get('password') || '').trim();
 
   try {
     setButtonLoading(submitBtn, true, 'Actualizando...');
@@ -758,7 +770,7 @@ async function handlePasswordUpdate(event) {
     form.reset();
     showToast('Contraseña actualizada.');
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message || 'No se pudo actualizar la contraseña.', true);
   } finally {
     setButtonLoading(submitBtn, false);
   }
@@ -773,7 +785,7 @@ async function handleLogout() {
     if (error) throw error;
     showToast('Sesión cerrada.');
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message || 'No se pudo cerrar la sesión.', true);
   } finally {
     setButtonLoading(button, false);
   }
@@ -1107,7 +1119,7 @@ async function handleEditReportSubmit(event) {
     closeEditModal();
     showToast('Reporte actualizado correctamente.');
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message || 'No se pudo actualizar el reporte.', true);
   } finally {
     setButtonLoading(submitBtn, false);
   }
@@ -1143,7 +1155,7 @@ async function handleDeleteReport(reportId, button) {
     refreshDataViews();
     showToast('Reporte eliminado correctamente.');
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message || 'No se pudo eliminar el reporte.', true);
   } finally {
     setButtonLoading(button, false);
   }
