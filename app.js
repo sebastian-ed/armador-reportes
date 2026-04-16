@@ -161,6 +161,32 @@ function withTimeout(promise, ms, message) {
   ]);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTimeoutLikeError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('tardó demasiado') || message.includes('timeout') || message.includes('timed out');
+}
+
+function isTransientNetworkError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return (
+    isTimeoutLikeError(error)
+    || message.includes('failed to fetch')
+    || message.includes('networkerror')
+    || message.includes('network request failed')
+    || message.includes('load failed')
+    || message.includes('fetch')
+  );
+}
+
+function isDuplicateKeyError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('duplicate key') || message.includes('already exists');
+}
+
 function formatDate(value) {
   if (!value) return '-';
   return new Date(`${value}T00:00:00`).toLocaleDateString('es-AR');
@@ -672,6 +698,73 @@ async function fetchSingleReport(reportId) {
   return data;
 }
 
+async function verifyReportExists(reportId, attempts = 4, delayMs = 2500) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const { data, error } = await withTimeout(
+        supabase.from('reports').select('id').eq('id', reportId).maybeSingle(),
+        12000,
+        'La verificación del guardado tardó demasiado.'
+      );
+
+      if (!error && data?.id) {
+        return true;
+      }
+    } catch {
+      // reintenta abajo
+    }
+
+    if (attempt < attempts) {
+      await sleep(delayMs);
+    }
+  }
+
+  return false;
+}
+
+async function saveReportRecord(payload, reportId) {
+  const saveAttempts = [30000, 45000];
+  let lastError = null;
+
+  for (let index = 0; index < saveAttempts.length; index += 1) {
+    try {
+      const { error } = await withTimeout(
+        supabase.from('reports').insert(payload),
+        saveAttempts[index],
+        'El guardado del reporte tardó demasiado.'
+      );
+
+      if (error) {
+        throw error;
+      }
+
+      return { recovered: false };
+    } catch (error) {
+      lastError = error;
+
+      if (isDuplicateKeyError(error)) {
+        const exists = await verifyReportExists(reportId, 3, 1800);
+        if (exists) return { recovered: true };
+      }
+
+      if (isTransientNetworkError(error)) {
+        const exists = await verifyReportExists(reportId, index === 0 ? 3 : 5, index === 0 ? 2200 : 3000);
+        if (exists) return { recovered: true };
+      }
+
+      if (!isTransientNetworkError(error) && !isDuplicateKeyError(error)) {
+        throw error;
+      }
+
+      if (index < saveAttempts.length - 1) {
+        await sleep(1200 * (index + 1));
+      }
+    }
+  }
+
+  throw lastError || new Error('No se pudo guardar el reporte.');
+}
+
 function upsertReportInState(report) {
   const idx = state.reports.findIndex((item) => item.id === report.id);
   if (idx >= 0) {
@@ -720,12 +813,7 @@ async function handleReportSubmit(event) {
   try {
     setButtonLoading(submitBtn, true, 'Guardando reporte...');
 
-    const { error } = await withTimeout(
-      supabase.from('reports').insert(payload),
-      20000,
-      'El guardado del reporte tardó demasiado. Probá de nuevo con mejor señal.'
-    );
-    if (error) throw error;
+    const saveResult = await saveReportRecord(payload, reportId);
 
     const optimisticReport = {
       ...payload,
@@ -740,8 +828,12 @@ async function handleReportSubmit(event) {
     setView('reports');
     showToast(
       pendingFiles.length
-        ? 'Reporte guardado. Las fotos se subirán en segundo plano.'
-        : 'Reporte guardado correctamente.'
+        ? (saveResult.recovered
+            ? 'Reporte guardado. La red respondió tarde, pero quedó registrado. Las fotos se subirán en segundo plano.'
+            : 'Reporte guardado. Las fotos se subirán en segundo plano.')
+        : (saveResult.recovered
+            ? 'Reporte guardado. La red respondió tarde, pero el registro quedó creado.'
+            : 'Reporte guardado correctamente.')
     );
   } catch (error) {
     showToast(error.message || 'No se pudo guardar el reporte.', true);
