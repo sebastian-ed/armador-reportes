@@ -8,6 +8,7 @@ const state = {
   profiles: [],
   pendingFiles: [],
   editingReportId: null,
+  objectUrls: [],
 };
 
 const els = {
@@ -69,6 +70,22 @@ const IMAGE_JPEG_QUALITY = 0.6;
 const MOBILE_IMAGE_JPEG_QUALITY = 0.52;
 const TARGET_IMAGE_BYTES = 450 * 1024;
 const TARGET_MOBILE_IMAGE_BYTES = 280 * 1024;
+
+
+function isMobileDevice() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || window.innerWidth <= 820;
+}
+
+function getImageOptimizationProfile(file = null) {
+  const source = file?.__source || '';
+  const fromCamera = source === 'camera';
+  const mobile = isMobileDevice() || fromCamera;
+  return {
+    maxDimension: mobile ? MOBILE_IMAGE_MAX_DIMENSION : DESKTOP_IMAGE_MAX_DIMENSION,
+    quality: mobile ? MOBILE_IMAGE_JPEG_QUALITY : DESKTOP_IMAGE_JPEG_QUALITY,
+    targetSize: mobile ? MOBILE_IMAGE_TARGET_SIZE : DESKTOP_IMAGE_TARGET_SIZE,
+  };
+}
 
 const viewMeta = {
   auth: ['Acceso', 'Ingresá o creá tu cuenta para operar la plataforma.'],
@@ -398,26 +415,25 @@ async function handleFilesSelected(event) {
   const files = [...(input.files || [])];
   if (!files.length) return;
 
-  const aggressive = input.id === 'cameraInput' || isProbablyMobileDevice();
-  showToast(`Optimizando ${files.length} foto${files.length !== 1 ? 's' : ''} para carga móvil...`);
+  const source = input.id === 'cameraInput' ? 'camera' : 'gallery';
+  const taggedFiles = files.slice(0, MAX_UPLOAD_FILES).map((file) => {
+    try {
+      Object.defineProperty(file, '__source', { value: source, configurable: true });
+    } catch {
+      file.__source = source;
+    }
+    return file;
+  });
 
-  try {
-    const preparedFiles = await Promise.race([
-      prepareSelectedFiles(files, { aggressive }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000)),
-    ]);
-    state.pendingFiles = [...state.pendingFiles, ...preparedFiles];
-    showToast(`${preparedFiles.length} foto${preparedFiles.length !== 1 ? 's' : ''} lista${preparedFiles.length !== 1 ? 's' : ''} para subir.`);
-  } catch (prepError) {
-    showToast('No se pudieron preparar las fotos. Probá con menos imágenes o una toma más liviana.', true);
-  } finally {
-    input.value = '';
-    renderPhotoPreview();
+  if (files.length > MAX_UPLOAD_FILES) {
+    showToast(`Se tomarán solo ${MAX_UPLOAD_FILES} fotos por reporte para evitar demoras.`, true);
+  } else {
+    showToast(`${taggedFiles.length} foto${taggedFiles.length !== 1 ? 's' : ''} listas para subir.`);
   }
-}
 
-function isProbablyMobileDevice() {
-  return window.matchMedia('(max-width: 760px)').matches || navigator.maxTouchPoints > 0;
+  state.pendingFiles = [...state.pendingFiles, ...taggedFiles].slice(0, MAX_UPLOAD_FILES);
+  input.value = '';
+  renderPhotoPreview();
 }
 
 async function prepareSelectedFiles(files, options = {}) {
@@ -527,6 +543,9 @@ function formatFileSize(bytes = 0) {
 }
 
 function renderPhotoPreview() {
+  state.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+  state.objectUrls = [];
+
   if (!state.pendingFiles.length) {
     els.photoPreview.innerHTML = '';
     return;
@@ -534,17 +553,18 @@ function renderPhotoPreview() {
 
   els.photoPreview.innerHTML = state.pendingFiles.map((file, index) => {
     const url = URL.createObjectURL(file);
+    state.objectUrls.push(url);
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
     return `
       <article class="photo-item">
-        <img src="${url}" alt="Vista previa ${index + 1}" onload="URL.revokeObjectURL(this.src)" />
-        <span>${escapeHtml(file.name)}</span>
-        <small class="photo-item-meta">${formatFileSize(file.size)}</small>
+        <img src="${url}" alt="Vista previa ${index + 1}" />
+        <span>${escapeHtml(file.name)} · ${sizeMb} MB</span>
       </article>
     `;
   }).join('');
 }
 
-function resetReportForm() {
+function resetReportForm()() {
   state.pendingFiles = [];
   renderPhotoPreview();
   els.reportForm.reset();
@@ -552,20 +572,21 @@ function resetReportForm() {
 }
 
 async function uploadSingleFile(reportId, file, retries = 3) {
-  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+  const preparedFile = await optimizeImageFile(file);
+  const ext = (preparedFile.name.split('.').pop() || 'jpg').toLowerCase();
   const path = `${state.session.user.id}/${reportId}/${crypto.randomUUID()}.${ext}`;
 
   let lastError;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const { error } = await supabase.storage.from('report-photos').upload(path, file, {
+      const { error } = await supabase.storage.from('report-photos').upload(path, preparedFile, {
         upsert: false,
-        contentType: file.type || 'image/jpeg',
+        contentType: preparedFile.type || 'image/jpeg',
       });
       if (error) throw error;
 
       const { data } = supabase.storage.from('report-photos').getPublicUrl(path);
-      return { report_id: reportId, file_name: file.name, storage_path: path, public_url: data.publicUrl };
+      return { report_id: reportId, file_name: preparedFile.name || file.name, storage_path: path, public_url: data.publicUrl };
     } catch (err) {
       lastError = err;
       if (attempt < retries) {
@@ -687,11 +708,17 @@ async function handleReportSubmit(event) {
   try {
     setButtonLoading(submitBtn, true, 'Guardando reporte...');
 
-    const { data, error } = await supabase.from('reports').insert(payload).select().single();
+    const { error } = await withTimeout(
+      supabase.from('reports').insert(payload),
+      20000,
+      'El guardado del reporte tardó demasiado. Probá de nuevo con mejor señal.'
+    );
     if (error) throw error;
 
     const optimisticReport = {
-      ...data,
+      ...payload,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       report_photos: [],
     };
     upsertReportInState(optimisticReport);
@@ -701,7 +728,7 @@ async function handleReportSubmit(event) {
     setView('reports');
     showToast(
       pendingFiles.length
-        ? 'Reporte guardado. Las fotos optimizadas se subirán en segundo plano.'
+        ? 'Reporte guardado. Las fotos se subirán en segundo plano.'
         : 'Reporte guardado correctamente.'
     );
   } catch (error) {
