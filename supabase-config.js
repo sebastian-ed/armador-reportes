@@ -1,8 +1,8 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
 const CONFIG = {
-  url: 'REEMPLAZAR_CON_SUPABASE_URL',
-  anonKey: 'REEMPLAZAR_CON_SUPABASE_ANON_KEY',
+  url: 'https://jwgrwnogsgdqqmfpqhwj.supabase.co',
+  anonKey: 'sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ',
 };
 
 function clean(value) {

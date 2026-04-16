@@ -223,6 +223,14 @@ async function ensureProfile(user, meta = null) {
 
 async function bootstrap() {
   bindEvents();
+
+  if (!ensureSupabaseReady()) {
+    renderConfigError();
+    hydrateSessionUI();
+    setView('auth');
+    return;
+  }
+
   const { data, error } = await supabase.auth.getSession();
   if (error) {
     showToast(error.message, true);
