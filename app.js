@@ -387,14 +387,20 @@ async function handleFilesSelected(event) {
   const files = [...(input.files || [])];
   if (!files.length) return;
 
+  showToast(`Preparando ${files.length} foto${files.length !== 1 ? 's' : ''}...`);
+
   try {
-    const preparedFiles = await prepareSelectedFiles(files);
+    const preparedFiles = await Promise.race([
+      prepareSelectedFiles(files),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000)),
+    ]);
     state.pendingFiles = [...state.pendingFiles, ...preparedFiles];
-    renderPhotoPreview();
-  } catch (error) {
-    showToast(`No se pudieron preparar las fotos: ${error.message}`, true);
+  } catch (prepError) {
+    // Si la compresion se cuelga, usar los archivos originales sin modificar
+    state.pendingFiles = [...state.pendingFiles, ...files];
   } finally {
     input.value = '';
+    renderPhotoPreview();
   }
 }
 
@@ -412,29 +418,39 @@ async function optimizeImageFile(file) {
   const needsCompression = file.size > IMAGE_COMPRESSION_THRESHOLD;
   if (!needsCompression) return file;
 
-  const image = await loadImageElement(file);
-  const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
-  const targetWidth = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
-  const targetHeight = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+  try {
+    const image = await Promise.race([
+      loadImageElement(file),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+    ]);
 
-  const canvas = document.createElement('canvas');
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return file;
-  ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+    const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+    const targetWidth = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+    const targetHeight = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
 
-  const blob = await new Promise((resolve) => {
-    canvas.toBlob(resolve, 'image/jpeg', IMAGE_JPEG_QUALITY);
-  });
+    const canvas = document.createElement('canvas');
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return file;
+    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
 
-  if (!blob || blob.size >= file.size) return file;
+    const blob = await Promise.race([
+      new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', IMAGE_JPEG_QUALITY)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
+    ]);
 
-  const baseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
-  return new File([blob], `${baseName}.jpg`, {
-    type: 'image/jpeg',
-    lastModified: Date.now(),
-  });
+    if (!blob || blob.size >= file.size) return file;
+
+    const baseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
+    return new File([blob], `${baseName}.jpg`, {
+      type: 'image/jpeg',
+      lastModified: Date.now(),
+    });
+  } catch {
+    // Si falla o se cuelga la compresion, subir el original sin modificar
+    return file;
+  }
 }
 
 async function loadImageElement(file) {
@@ -571,43 +587,45 @@ async function handleReportSubmit(event) {
   payload.observations = String(payload.observations || '').trim();
 
   try {
-    setButtonLoading(submitBtn, true, 'Guardando...');
     const pendingFiles = [...state.pendingFiles];
+
+    // Paso 1: guardar el reporte
+    setButtonLoading(submitBtn, true, 'Guardando reporte...');
     const { data, error } = await supabase.from('reports').insert(payload).select().single();
     if (error) throw error;
 
-    const fullReport = await fetchSingleReport(data.id);
-    upsertReportInState(fullReport);
+    // Resetear formulario inmediatamente para liberar memoria de archivos
     resetReportForm();
-    refreshDataViews();
-    setView('reports');
+
+    // Paso 2: subir fotos si hay, mantener boton bloqueado con progreso visible
     if (pendingFiles.length) {
       showUploadProgress(0, pendingFiles.length);
+      setButtonLoading(submitBtn, true, `Subiendo fotos (0/${pendingFiles.length})...`);
+      try {
+        await uploadReportFiles(data.id, pendingFiles, (done, total) => {
+          showUploadProgress(done, total);
+          setButtonLoading(submitBtn, true, `Subiendo fotos (${done}/${total})...`);
+        });
+        hideUploadProgress();
+        showToast('Reporte y fotos guardados correctamente.');
+      } catch (uploadError) {
+        hideUploadProgress();
+        showToast(`Reporte guardado. Error al subir fotos: ${uploadError.message}`, true);
+      }
     } else {
       showToast('Reporte guardado correctamente.');
     }
 
-    if (pendingFiles.length) {
-      void (async () => {
-        try {
-          const onProgress = (done, total) => {
-            showUploadProgress(done, total);
-          };
-          await uploadReportFiles(data.id, pendingFiles, onProgress);
-          const updatedReport = await fetchSingleReport(data.id);
-          upsertReportInState(updatedReport);
-          refreshDataViews();
-          hideUploadProgress();
-          showToast('Fotos cargadas correctamente.');
-        } catch (uploadError) {
-          hideUploadProgress();
-          showToast(`El reporte se guardó, pero falló la carga de fotos: ${uploadError.message}`, true);
-        }
-      })();
-    }
+    // Paso 3: refrescar datos y navegar
+    const fullReport = await fetchSingleReport(data.id);
+    upsertReportInState(fullReport);
+    refreshDataViews();
+    setView('reports');
+
   } catch (error) {
     showToast(error.message, true);
   } finally {
+    hideUploadProgress();
     setButtonLoading(submitBtn, false);
   }
 }
