@@ -6,6 +6,7 @@ const state = {
   reports: [],
   profiles: [],
   pendingFiles: [],
+  editingReportId: null,
 };
 
 const els = {
@@ -30,6 +31,13 @@ const els = {
   signupForm: document.getElementById('signupForm'),
   reportForm: document.getElementById('reportForm'),
   passwordForm: document.getElementById('passwordForm'),
+  editReportForm: document.getElementById('editReportForm'),
+  reportEditModal: document.getElementById('reportEditModal'),
+  closeEditModalBtn: document.getElementById('closeEditModalBtn'),
+  cancelEditModalBtn: document.getElementById('cancelEditModalBtn'),
+  photoLightbox: document.getElementById('photoLightbox'),
+  closeLightboxBtn: document.getElementById('closeLightboxBtn'),
+  lightboxImage: document.getElementById('lightboxImage'),
   reportSupervisorName: document.getElementById('reportSupervisorName'),
   photoInput: document.getElementById('photoInput'),
   cameraInput: document.getElementById('cameraInput'),
@@ -74,6 +82,17 @@ function formatDate(value) {
   return new Date(`${value}T00:00:00`).toLocaleDateString('es-AR');
 }
 
+function formatDateTime(value) {
+  if (!value) return '-';
+  return new Date(value).toLocaleString('es-AR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function escapeHtml(value = '') {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -105,8 +124,8 @@ function setView(viewName) {
 
 function getBadgeClass(status) {
   const danger = ['critico', 'grave', 'faltantes', 'ausencias', 'regular'];
-  const warn = ['bueno', 'moderada', 'ajustada'];
-  const success = ['excelente', 'muy_bueno', 'sin_novedad', 'optima', 'completo_puntual'];
+  const warn = ['bueno', 'moderada', 'ajustada', 'leve', 'completo_demoras', 'incompleto', 'suficiente'];
+  const success = ['excelente', 'muy_bueno', 'sin_novedad', 'optima', 'completo_puntual', 'no_aplica'];
   if (danger.includes(status)) return 'danger';
   if (warn.includes(status)) return 'warn';
   if (success.includes(status)) return 'success';
@@ -117,6 +136,13 @@ function prettifyEnum(value) {
   return String(value || '-')
     .replaceAll('_', ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function setButtonLoading(button, isLoading, loadingText = 'Procesando...') {
+  if (!button) return;
+  if (!button.dataset.originalText) button.dataset.originalText = button.textContent;
+  button.disabled = isLoading;
+  button.textContent = isLoading ? loadingText : button.dataset.originalText;
 }
 
 function hydrateSessionUI() {
@@ -187,7 +213,7 @@ async function bootstrap() {
     hydrateSessionUI();
   }
 
-  supabase.auth.onAuthStateChange(async (event, session) => {
+  supabase.auth.onAuthStateChange(async (_event, session) => {
     state.session = session;
     if (session?.user) {
       await ensureProfile(session.user);
@@ -217,6 +243,7 @@ function bindEvents() {
   els.signupForm.addEventListener('submit', handleSignup);
   els.reportForm.addEventListener('submit', handleReportSubmit);
   els.passwordForm.addEventListener('submit', handlePasswordUpdate);
+  els.editReportForm.addEventListener('submit', handleEditReportSubmit);
   els.logoutBtn.addEventListener('click', handleLogout);
   els.refreshDataBtn.addEventListener('click', loadAppData);
   els.photoInput.addEventListener('change', handleFilesSelected);
@@ -227,22 +254,38 @@ function bindEvents() {
   els.filterSearch.addEventListener('input', renderReportsTable);
   els.exportCsvBtn.addEventListener('click', exportReportsCsv);
   els.exportJsonBtn.addEventListener('click', exportReportsJson);
+  els.closeEditModalBtn.addEventListener('click', closeEditModal);
+  els.cancelEditModalBtn.addEventListener('click', closeEditModal);
+  els.closeLightboxBtn.addEventListener('click', closeLightbox);
+  els.reportsTableWrap.addEventListener('click', handleReportsActionClick);
 }
 
 async function handleLogin(event) {
   event.preventDefault();
-  const formData = new FormData(event.currentTarget);
-  const email = formData.get('email');
-  const password = formData.get('password');
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) return showToast(error.message, true);
-  event.currentTarget.reset();
-  showToast('Sesión iniciada correctamente.');
+  const form = event.currentTarget;
+  const submitBtn = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
+  const email = String(formData.get('email') || '').trim();
+  const password = String(formData.get('password') || '').trim();
+
+  try {
+    setButtonLoading(submitBtn, true, 'Ingresando...');
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    form.reset();
+    showToast('Sesión iniciada correctamente.');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setButtonLoading(submitBtn, false);
+  }
 }
 
 async function handleSignup(event) {
   event.preventDefault();
-  const formData = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const submitBtn = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
   const payload = {
     email: String(formData.get('email')).trim(),
     password: String(formData.get('password')).trim(),
@@ -254,13 +297,22 @@ async function handleSignup(event) {
     },
   };
 
-  const { error } = await supabase.auth.signUp(payload);
-  if (error) return showToast(error.message, true);
+  try {
+    setButtonLoading(submitBtn, true, 'Creando...');
+    const { data, error } = await supabase.auth.signUp(payload);
+    if (error) throw error;
 
-  event.currentTarget.reset();
-  showToast('Cuenta creada. Revisá la confirmación por email si está habilitada en Supabase.');
+    form.reset();
+    const requiresConfirmation = !data.session;
+    showToast(requiresConfirmation
+      ? 'Cuenta creada. Revisá el email para confirmar el acceso.'
+      : 'Cuenta creada correctamente. Ya podés ingresar.');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setButtonLoading(submitBtn, false);
+  }
 }
-
 
 function handleFilesSelected(event) {
   const files = [...event.target.files];
@@ -287,6 +339,13 @@ function renderPhotoPreview() {
   }).join('');
 }
 
+function resetReportForm() {
+  state.pendingFiles = [];
+  renderPhotoPreview();
+  els.reportForm.reset();
+  els.reportSupervisorName.value = state.profile?.full_name || state.session?.user?.email || '';
+}
+
 async function uploadReportFiles(reportId) {
   if (!state.pendingFiles.length) return [];
   const uploads = [];
@@ -309,11 +368,50 @@ async function uploadReportFiles(reportId) {
   return uploads;
 }
 
+async function fetchSingleReport(reportId) {
+  const { data, error } = await supabase
+    .from('reports')
+    .select('*, report_photos(*)')
+    .eq('id', reportId)
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+function upsertReportInState(report) {
+  const idx = state.reports.findIndex((item) => item.id === report.id);
+  if (idx >= 0) {
+    state.reports[idx] = report;
+  } else {
+    state.reports.unshift(report);
+  }
+  state.reports.sort((a, b) => {
+    const dateDiff = String(b.service_date).localeCompare(String(a.service_date));
+    if (dateDiff !== 0) return dateDiff;
+    return String(b.created_at).localeCompare(String(a.created_at));
+  });
+}
+
+function removeReportFromState(reportId) {
+  state.reports = state.reports.filter((item) => item.id !== reportId);
+}
+
+function refreshDataViews() {
+  renderDashboard();
+  renderReportsTable();
+  renderUsersTable();
+  renderProfile();
+  populateSupervisorFilter();
+}
+
 async function handleReportSubmit(event) {
   event.preventDefault();
   if (!state.session?.user) return showToast('Necesitás iniciar sesión.', true);
 
-  const formData = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const submitBtn = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
   const payload = Object.fromEntries(formData.entries());
   payload.user_id = state.session.user.id;
   payload.supervisor_id = state.session.user.id;
@@ -321,38 +419,62 @@ async function handleReportSubmit(event) {
   payload.summary = String(payload.summary || '').trim();
   payload.observations = String(payload.observations || '').trim();
 
-  const { data, error } = await supabase.from('reports').insert(payload).select().single();
-  if (error) return showToast(error.message, true);
-
   try {
-    await uploadReportFiles(data.id);
-  } catch (uploadError) {
-    showToast(`Reporte guardado, pero falló la carga de fotos: ${uploadError.message}`, true);
-  }
+    setButtonLoading(submitBtn, true, 'Guardando...');
+    const { data, error } = await supabase.from('reports').insert(payload).select().single();
+    if (error) throw error;
 
-  state.pendingFiles = [];
-  renderPhotoPreview();
-  event.currentTarget.reset();
-  els.reportSupervisorName.value = state.profile?.full_name || state.session.user.email;
-  showToast('Reporte guardado correctamente.');
-  await loadAppData();
-  setView('reports');
+    try {
+      await uploadReportFiles(data.id);
+    } catch (uploadError) {
+      showToast(`Reporte guardado, pero falló la carga de fotos: ${uploadError.message}`, true);
+    }
+
+    const fullReport = await fetchSingleReport(data.id);
+    upsertReportInState(fullReport);
+    resetReportForm();
+    refreshDataViews();
+    setView('reports');
+    showToast('Reporte guardado correctamente.');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setButtonLoading(submitBtn, false);
+  }
 }
 
 async function handlePasswordUpdate(event) {
   event.preventDefault();
-  const formData = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const submitBtn = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
   const password = String(formData.get('password')).trim();
-  const { error } = await supabase.auth.updateUser({ password });
-  if (error) return showToast(error.message, true);
-  event.currentTarget.reset();
-  showToast('Contraseña actualizada.');
+
+  try {
+    setButtonLoading(submitBtn, true, 'Actualizando...');
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) throw error;
+    form.reset();
+    showToast('Contraseña actualizada.');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setButtonLoading(submitBtn, false);
+  }
 }
 
 async function handleLogout() {
-  const { error } = await supabase.auth.signOut();
-  if (error) return showToast(error.message, true);
-  showToast('Sesión cerrada.');
+  const button = els.logoutBtn;
+  try {
+    setButtonLoading(button, true, 'Cerrando...');
+    const { error } = await supabase.auth.signOut();
+    if (error) throw error;
+    showToast('Sesión cerrada.');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setButtonLoading(button, false);
+  }
 }
 
 async function loadAppData() {
@@ -385,11 +507,7 @@ async function loadAppData() {
     hydrateSessionUI();
   }
 
-  renderDashboard();
-  renderReportsTable();
-  renderUsersTable();
-  renderProfile();
-  populateSupervisorFilter();
+  refreshDataViews();
 }
 
 function renderDashboard() {
@@ -449,6 +567,9 @@ function getFilteredReports() {
       report.observations,
       report.service_status,
       report.incident_level,
+      report.attendance_status,
+      report.supplies_status,
+      report.corrective_action,
     ].join(' ').toLowerCase();
     const matchesSearch = !search || text.includes(search);
     return matchesFrom && matchesTo && matchesSupervisor && matchesSearch;
@@ -463,42 +584,66 @@ function renderReportsTable() {
   }
 
   els.reportsTableWrap.innerHTML = `
-    <table class="table">
-      <thead>
-        <tr>
-          <th>Fecha</th>
-          <th>Supervisor</th>
-          <th>Servicio</th>
-          <th>Estado</th>
-          <th>Incidencias</th>
-          <th>Resumen</th>
-          <th>Fotos</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows.map((report) => `
-          <tr>
-            <td>${formatDate(report.service_date)}<small>${escapeHtml(report.shift)}</small></td>
-            <td>${escapeHtml(report.supervisor_name)}</td>
-            <td>
-              <strong>${escapeHtml(report.service_name)}</strong>
-              <small>${escapeHtml(report.location)}</small>
-            </td>
-            <td><span class="badge ${getBadgeClass(report.service_status)}">${prettifyEnum(report.service_status)}</span></td>
-            <td><span class="badge ${getBadgeClass(report.incident_level)}">${prettifyEnum(report.incident_level)}</span></td>
-            <td>
-              ${escapeHtml(report.summary)}
-              ${report.observations ? `<small>${escapeHtml(report.observations)}</small>` : ''}
-            </td>
-            <td>
+    <div class="report-grid-list">
+      ${rows.map((report) => `
+        <article class="report-card" data-report-id="${report.id}">
+          <div class="report-card-head">
+            <div>
+              <h4>${escapeHtml(report.service_name)}</h4>
+              <p>${formatDate(report.service_date)} · ${escapeHtml(report.location)} · ${escapeHtml(report.supervisor_name)}</p>
+              <p>Última actualización: ${formatDateTime(report.updated_at || report.created_at)}</p>
+            </div>
+            <div class="report-card-meta">
+              <span class="badge ${getBadgeClass(report.service_status)}">${prettifyEnum(report.service_status)}</span>
+              <span class="badge ${getBadgeClass(report.incident_level)}">${prettifyEnum(report.incident_level)}</span>
+              <span class="badge ${getBadgeClass(report.attendance_status)}">${prettifyEnum(report.attendance_status)}</span>
+              <span class="badge ${getBadgeClass(report.supplies_status)}">${prettifyEnum(report.supplies_status)}</span>
+            </div>
+          </div>
+
+          <div class="report-card-body">
+            <div class="report-card-text">
+              <div class="report-card-text-block">
+                <strong>Resumen ejecutivo</strong>
+                <div>${escapeHtml(report.summary)}</div>
+              </div>
+              ${report.observations ? `
+                <div class="report-card-text-block">
+                  <strong>Observaciones</strong>
+                  <div>${escapeHtml(report.observations)}</div>
+                </div>
+              ` : ''}
+              <div class="report-card-text-block">
+                <strong>Detalle operativo</strong>
+                <div>Turno: ${escapeHtml(prettifyEnum(report.shift))}</div>
+                <div>Acción correctiva: ${escapeHtml(prettifyEnum(report.corrective_action))}</div>
+                <div>Fotos adjuntas: ${(report.report_photos || []).length}</div>
+              </div>
+            </div>
+
+            <div>
               ${(report.report_photos || []).length
-                ? report.report_photos.map((photo, idx) => `<a href="${photo.public_url}" target="_blank" rel="noopener">Foto ${idx + 1}</a>`).join('<br>')
-                : '<span class="badge neutral">Sin fotos</span>'}
-            </td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
+                ? `
+                  <div class="photo-gallery">
+                    ${report.report_photos.map((photo, idx) => `
+                      <div class="photo-thumb">
+                        <img src="${photo.public_url}" alt="Foto ${idx + 1} del reporte" data-action="open-photo" data-photo-url="${photo.public_url}" />
+                        <span>Foto ${idx + 1}</span>
+                      </div>
+                    `).join('')}
+                  </div>
+                `
+                : '<div class="report-card-text-block"><strong>Fotos</strong><div>Sin fotos adjuntas.</div></div>'}
+            </div>
+          </div>
+
+          <div class="report-actions">
+            <button type="button" class="btn btn-secondary btn-sm" data-action="edit-report" data-report-id="${report.id}">Editar</button>
+            <button type="button" class="btn btn-danger btn-sm" data-action="delete-report" data-report-id="${report.id}">Eliminar</button>
+          </div>
+        </article>
+      `).join('')}
+    </div>
   `;
 }
 
@@ -550,7 +695,7 @@ function populateSupervisorFilter() {
   const unique = [...new Set(state.profiles.map((profile) => profile.full_name).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const current = els.filterSupervisor.value;
   els.filterSupervisor.innerHTML = '<option value="">Todos</option>' + unique.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
-  els.filterSupervisor.value = current;
+  els.filterSupervisor.value = unique.includes(current) ? current : '';
 }
 
 function downloadFile(filename, content, mimeType) {
@@ -596,6 +741,129 @@ function exportReportsJson() {
   const rows = getFilteredReports();
   if (!rows.length) return showToast('No hay reportes para exportar.', true);
   downloadFile(`reportes_${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(rows, null, 2), 'application/json;charset=utf-8;');
+}
+
+function openEditModal(reportId) {
+  const report = state.reports.find((item) => item.id === reportId);
+  if (!report) return showToast('No se encontró el reporte.', true);
+
+  state.editingReportId = reportId;
+  const form = els.editReportForm;
+  form.elements.id.value = report.id;
+  form.elements.service_date.value = report.service_date || '';
+  form.elements.supervisor_name.value = report.supervisor_name || '';
+  form.elements.service_name.value = report.service_name || '';
+  form.elements.location.value = report.location || '';
+  form.elements.shift.value = report.shift || '';
+  form.elements.service_status.value = report.service_status || '';
+  form.elements.attendance_status.value = report.attendance_status || '';
+  form.elements.supplies_status.value = report.supplies_status || '';
+  form.elements.incident_level.value = report.incident_level || '';
+  form.elements.corrective_action.value = report.corrective_action || '';
+  form.elements.summary.value = report.summary || '';
+  form.elements.observations.value = report.observations || '';
+  els.reportEditModal.showModal();
+}
+
+function closeEditModal() {
+  state.editingReportId = null;
+  els.editReportForm.reset();
+  els.reportEditModal.close();
+}
+
+function openLightbox(url) {
+  els.lightboxImage.src = url;
+  els.photoLightbox.showModal();
+}
+
+function closeLightbox() {
+  els.lightboxImage.src = '';
+  els.photoLightbox.close();
+}
+
+async function handleEditReportSubmit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submitBtn = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
+  const reportId = String(formData.get('id') || state.editingReportId || '').trim();
+  const payload = Object.fromEntries(formData.entries());
+  delete payload.id;
+  payload.summary = String(payload.summary || '').trim();
+  payload.observations = String(payload.observations || '').trim();
+  payload.supervisor_name = state.profile?.full_name || payload.supervisor_name;
+
+  try {
+    setButtonLoading(submitBtn, true, 'Guardando...');
+    const { error } = await supabase.from('reports').update(payload).eq('id', reportId);
+    if (error) throw error;
+    const fullReport = await fetchSingleReport(reportId);
+    upsertReportInState(fullReport);
+    refreshDataViews();
+    closeEditModal();
+    showToast('Reporte actualizado correctamente.');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setButtonLoading(submitBtn, false);
+  }
+}
+
+async function handleDeleteReport(reportId, button) {
+  const report = state.reports.find((item) => item.id === reportId);
+  if (!report) return showToast('No se encontró el reporte.', true);
+
+  const confirmed = window.confirm(`Se eliminará el reporte de ${report.service_name} del ${formatDate(report.service_date)}. Esta acción no se puede deshacer.`);
+  if (!confirmed) return;
+
+  try {
+    setButtonLoading(button, true, 'Eliminando...');
+
+    const photos = report.report_photos || [];
+    if (photos.length) {
+      const { error: deletePhotosError } = await supabase.from('report_photos').delete().eq('report_id', reportId);
+      if (deletePhotosError) throw deletePhotosError;
+
+      const paths = photos.map((photo) => photo.storage_path).filter(Boolean);
+      if (paths.length) {
+        const { error: storageError } = await supabase.storage.from('report-photos').remove(paths);
+        if (storageError) throw storageError;
+      }
+    }
+
+    const { error } = await supabase.from('reports').delete().eq('id', reportId);
+    if (error) throw error;
+
+    removeReportFromState(reportId);
+    refreshDataViews();
+    showToast('Reporte eliminado correctamente.');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setButtonLoading(button, false);
+  }
+}
+
+function handleReportsActionClick(event) {
+  const actionEl = event.target.closest('[data-action]');
+  if (!actionEl) return;
+
+  const action = actionEl.dataset.action;
+  const reportId = actionEl.dataset.reportId;
+
+  if (action === 'edit-report' && reportId) {
+    openEditModal(reportId);
+    return;
+  }
+
+  if (action === 'delete-report' && reportId) {
+    handleDeleteReport(reportId, actionEl);
+    return;
+  }
+
+  if (action === 'open-photo') {
+    openLightbox(actionEl.dataset.photoUrl);
+  }
 }
 
 bootstrap();

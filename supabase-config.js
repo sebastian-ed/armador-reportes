@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
-const SUPABASE_URL = 'https://jwgrwnogsgdqqmfpqhwj.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ';
+const SUPABASE_URL = 'REEMPLAZAR_CON_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'REEMPLAZAR_CON_SUPABASE_ANON_KEY';
 
 if (SUPABASE_URL.includes('REEMPLAZAR') || SUPABASE_ANON_KEY.includes('REEMPLAZAR')) {
   console.warn('Configurá SUPABASE_URL y SUPABASE_ANON_KEY en supabase-config.js antes de usar la app.');
