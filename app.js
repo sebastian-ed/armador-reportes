@@ -382,11 +382,11 @@ function resetReportForm() {
   els.reportSupervisorName.value = state.profile?.full_name || state.session?.user?.email || '';
 }
 
-async function uploadReportFiles(reportId) {
-  if (!state.pendingFiles.length) return [];
+async function uploadReportFiles(reportId, files = state.pendingFiles) {
+  if (!files.length) return [];
   const uploads = [];
 
-  for (const file of state.pendingFiles) {
+  for (const file of files) {
     const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
     const path = `${state.session.user.id}/${reportId}/${crypto.randomUUID()}.${ext}`;
     const { error } = await supabase.storage.from('report-photos').upload(path, file, {
@@ -458,21 +458,32 @@ async function handleReportSubmit(event) {
 
   try {
     setButtonLoading(submitBtn, true, 'Guardando...');
+    const pendingFiles = [...state.pendingFiles];
     const { data, error } = await supabase.from('reports').insert(payload).select().single();
     if (error) throw error;
-
-    try {
-      await uploadReportFiles(data.id);
-    } catch (uploadError) {
-      showToast(`Reporte guardado, pero falló la carga de fotos: ${uploadError.message}`, true);
-    }
 
     const fullReport = await fetchSingleReport(data.id);
     upsertReportInState(fullReport);
     resetReportForm();
     refreshDataViews();
     setView('reports');
-    showToast('Reporte guardado correctamente.');
+    showToast(pendingFiles.length
+      ? 'Reporte guardado. Se están cargando las fotos en segundo plano.'
+      : 'Reporte guardado correctamente.');
+
+    if (pendingFiles.length) {
+      void (async () => {
+        try {
+          await uploadReportFiles(data.id, pendingFiles);
+          const updatedReport = await fetchSingleReport(data.id);
+          upsertReportInState(updatedReport);
+          refreshDataViews();
+          showToast('Fotos cargadas correctamente.');
+        } catch (uploadError) {
+          showToast(`El reporte se guardó, pero falló la carga de fotos: ${uploadError.message}`, true);
+        }
+      })();
+    }
   } catch (error) {
     showToast(error.message, true);
   } finally {

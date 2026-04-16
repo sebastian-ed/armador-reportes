@@ -2,8 +2,8 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 
 // Pegá acá tus credenciales de Supabase.
 // Formato correcto:
-//   url: 'https:'
-//   anonKey: 'sb_'
+//   url: 'https://tu-proyecto.supabase.co'
+//   anonKey: 'eyJ...'
 const CONFIG = {
   url: 'https://jwgrwnogsgdqqmfpqhwj.supabase.co',
   anonKey: 'sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ',
