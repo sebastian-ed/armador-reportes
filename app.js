@@ -1,3 +1,4 @@
+
 import { supabase, supabaseConfigError, isSupabaseConfigured } from './supabase-config.js';
 
 const state = {
@@ -9,6 +10,8 @@ const state = {
   pendingFiles: [],
   editingReportId: null,
   objectUrls: [],
+  syncInProgress: false,
+  syncToastShown: false,
 };
 
 const els = {
@@ -62,14 +65,20 @@ const els = {
   toast: document.getElementById('toast'),
 };
 
-const MAX_UPLOAD_FILES = 6;
-const IMAGE_COMPRESSION_THRESHOLD = 250 * 1024;
+const MAX_UPLOAD_FILES = 4;
+const IMAGE_COMPRESSION_THRESHOLD = 180 * 1024;
 const DESKTOP_IMAGE_MAX_DIMENSION = 1280;
-const MOBILE_IMAGE_MAX_DIMENSION = 960;
-const DESKTOP_IMAGE_JPEG_QUALITY = 0.68;
-const MOBILE_IMAGE_JPEG_QUALITY = 0.55;
-const DESKTOP_IMAGE_TARGET_SIZE = 450 * 1024;
-const MOBILE_IMAGE_TARGET_SIZE = 280 * 1024;
+const MOBILE_IMAGE_MAX_DIMENSION = 900;
+const DESKTOP_IMAGE_JPEG_QUALITY = 0.64;
+const MOBILE_IMAGE_JPEG_QUALITY = 0.48;
+const DESKTOP_IMAGE_TARGET_SIZE = 340 * 1024;
+const MOBILE_IMAGE_TARGET_SIZE = 220 * 1024;
+const REPORT_SAVE_TIMEOUT_MS = 45000;
+const VERIFY_TIMEOUT_MS = 12000;
+const PHOTO_UPLOAD_TIMEOUT_MS = 70000;
+const SYNC_DB_NAME = 'cleanit-report-sync';
+const SYNC_DB_VERSION = 1;
+const SYNC_STORE = 'pendingReports';
 
 const viewMeta = {
   auth: ['Acceso', 'Ingresá o creá tu cuenta para operar la plataforma.'],
@@ -84,13 +93,23 @@ function isMobileDevice() {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') || window.innerWidth <= 820;
 }
 
+function getNetworkProfile() {
+  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
+  const effectiveType = String(connection?.effectiveType || '').toLowerCase();
+  const saveData = Boolean(connection?.saveData);
+  const slow = saveData || ['slow-2g', '2g', '3g'].includes(effectiveType);
+  return { effectiveType, saveData, slow };
+}
+
 function getImageOptimizationProfile(file = null) {
   const source = file?.__source || '';
   const mobile = isMobileDevice() || source === 'camera';
+  const network = getNetworkProfile();
+  const slow = mobile || network.slow;
   return {
-    maxDimension: mobile ? MOBILE_IMAGE_MAX_DIMENSION : DESKTOP_IMAGE_MAX_DIMENSION,
-    quality: mobile ? MOBILE_IMAGE_JPEG_QUALITY : DESKTOP_IMAGE_JPEG_QUALITY,
-    targetSize: mobile ? MOBILE_IMAGE_TARGET_SIZE : DESKTOP_IMAGE_TARGET_SIZE,
+    maxDimension: slow ? MOBILE_IMAGE_MAX_DIMENSION : DESKTOP_IMAGE_MAX_DIMENSION,
+    quality: slow ? MOBILE_IMAGE_JPEG_QUALITY : DESKTOP_IMAGE_JPEG_QUALITY,
+    targetSize: slow ? MOBILE_IMAGE_TARGET_SIZE : DESKTOP_IMAGE_TARGET_SIZE,
   };
 }
 
@@ -115,16 +134,16 @@ function renderConfigError() {
       <p>La anon key debe ser la clave pública del proyecto, sin comillas rotas, sin espacios y sin saltos de línea.</p>
     </div>
   `;
-  els.authView.prepend(card);
+  els.authView?.prepend(card);
 }
 
-function showToast(message, isError = false) {
+function showToast(message, isError = false, duration = 3200) {
   if (!els.toast) return;
   els.toast.textContent = message;
   els.toast.classList.remove('hidden');
   els.toast.style.background = isError ? '#7f1d1d' : '#0f172a';
   clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => els.toast.classList.add('hidden'), 3200);
+  showToast.timer = setTimeout(() => els.toast.classList.add('hidden'), duration);
 }
 
 function showUploadProgress(done, total) {
@@ -143,7 +162,7 @@ function showUploadProgress(done, total) {
   document.getElementById('uploadProgressInner').style.width = `${pct}%`;
   document.getElementById('uploadProgressLabel').textContent =
     done === 0
-      ? `Subiendo ${total} foto${total !== 1 ? 's' : ''}…`
+      ? `Sincronizando ${total} foto${total !== 1 ? 's' : ''}…`
       : done < total
         ? `Fotos: ${done} de ${total}`
         : `Finalizando…`;
@@ -179,6 +198,7 @@ function isTransientNetworkError(error) {
     || message.includes('network request failed')
     || message.includes('load failed')
     || message.includes('fetch')
+    || message.includes('network')
   );
 }
 
@@ -213,12 +233,14 @@ function escapeHtml(value = '') {
 }
 
 function setView(viewName) {
-  Object.values(els.views).forEach((view) => view.classList.add('hidden'));
-  Object.values(els.views).forEach((view) => view.classList.remove('active'));
+  Object.values(els.views).forEach((view) => {
+    view?.classList.add('hidden');
+    view?.classList.remove('active');
+  });
 
   if (viewName === 'new-report') {
-    els.views.newReport.classList.remove('hidden');
-    els.views.newReport.classList.add('active');
+    els.views.newReport?.classList.remove('hidden');
+    els.views.newReport?.classList.add('active');
   } else {
     const target = els.views[viewName];
     if (!target) return;
@@ -228,8 +250,8 @@ function setView(viewName) {
 
   els.navLinks.forEach((btn) => btn.classList.toggle('active', btn.dataset.view === viewName));
   const meta = viewMeta[viewName] || ['Panel', ''];
-  els.viewTitle.textContent = meta[0];
-  els.viewSubtitle.textContent = meta[1];
+  if (els.viewTitle) els.viewTitle.textContent = meta[0];
+  if (els.viewSubtitle) els.viewSubtitle.textContent = meta[1];
 }
 
 function getBadgeClass(status) {
@@ -257,21 +279,22 @@ function setButtonLoading(button, isLoading, loadingText = 'Procesando...') {
 
 function hydrateSessionUI() {
   const authenticated = Boolean(state.session?.user);
-  els.nav.classList.toggle('hidden', !authenticated);
-  els.sessionBox.classList.toggle('hidden', !authenticated);
-  els.refreshDataBtn.classList.toggle('hidden', !authenticated);
+  els.nav?.classList.toggle('hidden', !authenticated);
+  els.sessionBox?.classList.toggle('hidden', !authenticated);
+  els.refreshDataBtn?.classList.toggle('hidden', !authenticated);
 
   if (!authenticated) {
-    els.sessionUserName.textContent = '-';
-    els.sessionUserRole.textContent = '-';
-    els.reportSupervisorName.value = '';
+    if (els.sessionUserName) els.sessionUserName.textContent = '-';
+    if (els.sessionUserRole) els.sessionUserRole.textContent = '-';
+    if (els.reportSupervisorName) els.reportSupervisorName.value = '';
     setView('auth');
     return;
   }
 
-  els.sessionUserName.textContent = state.profile?.full_name || state.session.user.email;
-  els.sessionUserRole.textContent = prettifyEnum(state.profile?.role || 'supervisor');
-  els.reportSupervisorName.value = state.profile?.full_name || state.session.user.email;
+  if (els.sessionUserName) els.sessionUserName.textContent = state.profile?.full_name || state.session.user.email;
+  if (els.sessionUserRole) els.sessionUserRole.textContent = prettifyEnum(state.profile?.role || 'supervisor');
+  if (els.reportSupervisorName) els.reportSupervisorName.value = state.profile?.full_name || state.session.user.email;
+
   document.querySelectorAll('.admin-only').forEach((el) => {
     el.classList.toggle('hidden', state.profile?.role !== 'admin');
   });
@@ -307,8 +330,92 @@ async function ensureProfile(user, meta = null) {
   return data;
 }
 
+function idbRequest(requestOrTx) {
+  return new Promise((resolve, reject) => {
+    requestOrTx.onsuccess = () => resolve(requestOrTx.result);
+    requestOrTx.oncomplete = () => resolve(true);
+    requestOrTx.onerror = () => reject(requestOrTx.error || new Error('No se pudo acceder al almacenamiento local.'));
+    requestOrTx.onabort = () => reject(requestOrTx.error || new Error('La operación local fue cancelada.'));
+  });
+}
+
+async function openSyncDb() {
+  return await new Promise((resolve, reject) => {
+    const request = indexedDB.open(SYNC_DB_NAME, SYNC_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SYNC_STORE)) {
+        const store = db.createObjectStore(SYNC_STORE, { keyPath: 'id' });
+        store.createIndex('userId', 'userId', { unique: false });
+        store.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('No se pudo abrir la base local.'));
+  });
+}
+
+async function putPendingReport(record) {
+  if (!('indexedDB' in window)) return;
+  const db = await openSyncDb();
+  try {
+    const tx = db.transaction(SYNC_STORE, 'readwrite');
+    tx.objectStore(SYNC_STORE).put(record);
+    await idbRequest(tx);
+  } finally {
+    db.close();
+  }
+}
+
+async function getPendingReportsForUser(userId) {
+  if (!('indexedDB' in window) || !userId) return [];
+  const db = await openSyncDb();
+  try {
+    const tx = db.transaction(SYNC_STORE, 'readonly');
+    const store = tx.objectStore(SYNC_STORE);
+    const all = await idbRequest(store.getAll());
+    return (all || [])
+      .filter((item) => item.userId === userId)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  } finally {
+    db.close();
+  }
+}
+
+async function deletePendingReport(id) {
+  if (!('indexedDB' in window)) return;
+  const db = await openSyncDb();
+  try {
+    const tx = db.transaction(SYNC_STORE, 'readwrite');
+    tx.objectStore(SYNC_STORE).delete(id);
+    await idbRequest(tx);
+  } finally {
+    db.close();
+  }
+}
+
+function normalizePendingRecord(payload, files = []) {
+  return {
+    id: payload.id,
+    userId: payload.user_id,
+    payload,
+    files,
+    reportInserted: false,
+    uploadedPhotos: [],
+    photosLinked: false,
+    attempts: 0,
+    lastError: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 async function bootstrap() {
   bindEvents();
+
+  if (els.cameraInput) {
+    els.cameraInput.removeAttribute('multiple');
+  }
 
   if (!ensureSupabaseReady()) {
     renderConfigError();
@@ -327,6 +434,7 @@ async function bootstrap() {
       hydrateSessionUI();
       await loadAppData();
       setView('dashboard');
+      void syncPendingReports({ silent: true });
     } else {
       hydrateSessionUI();
     }
@@ -343,6 +451,7 @@ async function bootstrap() {
         hydrateSessionUI();
         await loadAppData();
         setView('dashboard');
+        void syncPendingReports({ silent: true });
       } else {
         state.profile = null;
         state.reports = [];
@@ -371,7 +480,10 @@ function bindEvents() {
   els.passwordForm?.addEventListener('submit', handlePasswordUpdate);
   els.editReportForm?.addEventListener('submit', handleEditReportSubmit);
   els.logoutBtn?.addEventListener('click', handleLogout);
-  els.refreshDataBtn?.addEventListener('click', loadAppData);
+  els.refreshDataBtn?.addEventListener('click', async () => {
+    await loadAppData();
+    void syncPendingReports({ silent: true });
+  });
   els.photoInput?.addEventListener('change', handleFilesSelected);
   els.cameraInput?.addEventListener('change', handleFilesSelected);
   els.filterFrom?.addEventListener('input', renderReportsTable);
@@ -384,6 +496,12 @@ function bindEvents() {
   els.cancelEditModalBtn?.addEventListener('click', closeEditModal);
   els.closeLightboxBtn?.addEventListener('click', closeLightbox);
   els.reportsTableWrap?.addEventListener('click', handleReportsActionClick);
+  window.addEventListener('online', () => void syncPendingReports({ silent: false }));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      void syncPendingReports({ silent: true });
+    }
+  });
 }
 
 async function handleLogin(event) {
@@ -399,7 +517,7 @@ async function handleLogin(event) {
     setButtonLoading(submitBtn, true, 'Ingresando...');
     const { error } = await withTimeout(
       supabase.auth.signInWithPassword({ email, password }),
-      20000,
+      30000,
       'El ingreso tardó demasiado. Revisá tu conexión e intentá otra vez.'
     );
     if (error) throw error;
@@ -433,7 +551,7 @@ async function handleSignup(event) {
     setButtonLoading(submitBtn, true, 'Creando...');
     const { data, error } = await withTimeout(
       supabase.auth.signUp(payload),
-      20000,
+      30000,
       'La creación de la cuenta tardó demasiado. Intentá de nuevo.'
     );
     if (error) throw error;
@@ -483,6 +601,28 @@ async function handleFilesSelected(event) {
   renderPhotoPreview();
 }
 
+async function loadImageSource(file) {
+  if ('createImageBitmap' in window) {
+    try {
+      return await createImageBitmap(file);
+    } catch {
+      // fallback below
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('No se pudo leer la imagen seleccionada.'));
+      img.src = objectUrl;
+    });
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  }
+}
+
 async function optimizeImageFile(file) {
   const profile = getImageOptimizationProfile(file);
   const needsCompression = file.size > IMAGE_COMPRESSION_THRESHOLD || file.__source === 'camera' || isMobileDevice();
@@ -510,7 +650,7 @@ async function optimizeImageFile(file) {
     let quality = profile.quality;
     let bestBlob = null;
 
-    for (let pass = 0; pass < 4; pass += 1) {
+    for (let pass = 0; pass < 5; pass += 1) {
       canvas.width = width;
       canvas.height = height;
       ctx.clearRect(0, 0, width, height);
@@ -526,12 +666,12 @@ async function optimizeImageFile(file) {
         if (blob.size <= profile.targetSize) break;
       }
 
-      quality = Math.max(0.42, quality - 0.08);
-      width = Math.max(640, Math.round(width * 0.82));
-      height = Math.max(640, Math.round(height * 0.82));
+      quality = Math.max(0.38, quality - 0.08);
+      width = Math.max(560, Math.round(width * 0.8));
+      height = Math.max(560, Math.round(height * 0.8));
     }
 
-    if (!bestBlob || bestBlob.size >= file.size) return file;
+    if (!bestBlob) return file;
 
     const baseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
     const newFile = new File([bestBlob], `${baseName}.jpg`, {
@@ -553,45 +693,43 @@ async function optimizeImageFile(file) {
   }
 }
 
-async function loadImageSource(file) {
-  if ('createImageBitmap' in window) {
-    try {
-      return await createImageBitmap(file);
-    } catch {
-      // fallback below
-    }
-  }
-
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    return await new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('No se pudo leer la imagen seleccionada.'));
-      img.src = objectUrl;
-    });
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-  }
+function formatFileSize(bytes = 0) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function renderPhotoPreview() {
   state.objectUrls.forEach((url) => URL.revokeObjectURL(url));
   state.objectUrls = [];
 
+  if (!els.photoPreview) return;
+
   if (!state.pendingFiles.length) {
     els.photoPreview.innerHTML = '';
     return;
   }
 
+  const mobile = isMobileDevice();
   els.photoPreview.innerHTML = state.pendingFiles.map((file, index) => {
+    const sizeLabel = formatFileSize(file.size);
+    if (mobile || file.size > 2 * 1024 * 1024) {
+      return `
+        <article class="photo-item">
+          <div style="padding:14px;">
+            <strong>Foto ${index + 1}</strong>
+            <span>${escapeHtml(file.name)} · ${sizeLabel}</span>
+          </div>
+        </article>
+      `;
+    }
+
     const url = URL.createObjectURL(file);
     state.objectUrls.push(url);
-    const sizeKb = Math.round(file.size / 1024);
     return `
       <article class="photo-item">
         <img src="${url}" alt="Vista previa ${index + 1}" />
-        <span>${escapeHtml(file.name)} · ${sizeKb} KB</span>
+        <span>${escapeHtml(file.name)} · ${sizeLabel}</span>
       </article>
     `;
   }).join('');
@@ -600,11 +738,13 @@ function renderPhotoPreview() {
 function resetReportForm() {
   state.pendingFiles = [];
   renderPhotoPreview();
-  els.reportForm.reset();
-  els.reportSupervisorName.value = state.profile?.full_name || state.session?.user?.email || '';
+  els.reportForm?.reset();
+  if (els.reportSupervisorName) {
+    els.reportSupervisorName.value = state.profile?.full_name || state.session?.user?.email || '';
+  }
 }
 
-async function uploadSingleFile(reportId, file, retries = 2) {
+async function uploadSingleFile(reportId, file, retries = 3) {
   const preparedFile = await optimizeImageFile(file);
   const ext = (preparedFile.name.split('.').pop() || 'jpg').toLowerCase();
   const path = `${state.session.user.id}/${reportId}/${crypto.randomUUID()}.${ext}`;
@@ -612,10 +752,14 @@ async function uploadSingleFile(reportId, file, retries = 2) {
   let lastError;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
-      const { error } = await supabase.storage.from('report-photos').upload(path, preparedFile, {
-        upsert: false,
-        contentType: preparedFile.type || 'image/jpeg',
-      });
+      const { error } = await withTimeout(
+        supabase.storage.from('report-photos').upload(path, preparedFile, {
+          upsert: false,
+          contentType: preparedFile.type || 'image/jpeg',
+        }),
+        PHOTO_UPLOAD_TIMEOUT_MS,
+        'La foto tardó demasiado en subirse.'
+      );
       if (error) throw error;
 
       const { data } = supabase.storage.from('report-photos').getPublicUrl(path);
@@ -625,66 +769,15 @@ async function uploadSingleFile(reportId, file, retries = 2) {
         storage_path: path,
         public_url: data.publicUrl,
       };
-    } catch (err) {
-      lastError = err;
+    } catch (error) {
+      lastError = error;
       if (attempt < retries) {
-        await new Promise((res) => setTimeout(res, 700 * attempt));
+        await sleep(1200 * attempt);
       }
     }
   }
+
   throw lastError;
-}
-
-async function uploadReportFilesSequential(reportId, files = state.pendingFiles, onProgress = null) {
-  if (!files.length) return [];
-
-  const uploads = [];
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index];
-    const uploaded = await withTimeout(
-      uploadSingleFile(reportId, file),
-      45000,
-      `La foto ${index + 1} tardó demasiado en subirse.`
-    );
-    uploads.push(uploaded);
-    if (onProgress) onProgress(index + 1, files.length);
-  }
-
-  const { error: photosError } = await withTimeout(
-    supabase.from('report_photos').insert(uploads),
-    30000,
-    'No se pudo vincular las fotos al reporte.'
-  );
-  if (photosError) throw photosError;
-  return uploads;
-}
-
-async function uploadReportFilesInBackground(reportId, files = []) {
-  if (!files.length) return;
-
-  try {
-    showUploadProgress(0, files.length);
-    const uploads = await uploadReportFilesSequential(reportId, files, (done, total) => {
-      showUploadProgress(done, total);
-    });
-
-    const report = state.reports.find((item) => item.id === reportId);
-    if (report) {
-      report.report_photos = [...(report.report_photos || []), ...uploads];
-      report.updated_at = new Date().toISOString();
-      refreshDataViews();
-    } else {
-      const fullReport = await fetchSingleReport(reportId);
-      upsertReportInState(fullReport);
-      refreshDataViews();
-    }
-
-    showToast('Reporte guardado y fotos cargadas correctamente.');
-  } catch (error) {
-    showToast(`Reporte guardado. Las fotos no se terminaron de subir: ${error.message}`, true);
-  } finally {
-    hideUploadProgress();
-  }
 }
 
 async function fetchSingleReport(reportId) {
@@ -698,84 +791,17 @@ async function fetchSingleReport(reportId) {
   return data;
 }
 
-async function verifyReportExists(reportId, attempts = 4, delayMs = 2500) {
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      const { data, error } = await withTimeout(
-        supabase.from('reports').select('id').eq('id', reportId).maybeSingle(),
-        12000,
-        'La verificación del guardado tardó demasiado.'
-      );
-
-      if (!error && data?.id) {
-        return true;
-      }
-    } catch {
-      // reintenta abajo
-    }
-
-    if (attempt < attempts) {
-      await sleep(delayMs);
-    }
-  }
-
-  return false;
-}
-
-async function saveReportRecord(payload, reportId) {
-  const saveAttempts = [30000, 45000];
-  let lastError = null;
-
-  for (let index = 0; index < saveAttempts.length; index += 1) {
-    try {
-      const { error } = await withTimeout(
-        supabase.from('reports').insert(payload),
-        saveAttempts[index],
-        'El guardado del reporte tardó demasiado.'
-      );
-
-      if (error) {
-        throw error;
-      }
-
-      return { recovered: false };
-    } catch (error) {
-      lastError = error;
-
-      if (isDuplicateKeyError(error)) {
-        const exists = await verifyReportExists(reportId, 3, 1800);
-        if (exists) return { recovered: true };
-      }
-
-      if (isTransientNetworkError(error)) {
-        const exists = await verifyReportExists(reportId, index === 0 ? 3 : 5, index === 0 ? 2200 : 3000);
-        if (exists) return { recovered: true };
-      }
-
-      if (!isTransientNetworkError(error) && !isDuplicateKeyError(error)) {
-        throw error;
-      }
-
-      if (index < saveAttempts.length - 1) {
-        await sleep(1200 * (index + 1));
-      }
-    }
-  }
-
-  throw lastError || new Error('No se pudo guardar el reporte.');
-}
-
 function upsertReportInState(report) {
   const idx = state.reports.findIndex((item) => item.id === report.id);
   if (idx >= 0) {
-    state.reports[idx] = report;
+    state.reports[idx] = { ...state.reports[idx], ...report };
   } else {
     state.reports.unshift(report);
   }
   state.reports.sort((a, b) => {
-    const dateDiff = String(b.service_date).localeCompare(String(a.service_date));
+    const dateDiff = String(b.service_date || '').localeCompare(String(a.service_date || ''));
     if (dateDiff !== 0) return dateDiff;
-    return String(b.created_at).localeCompare(String(a.created_at));
+    return String(b.created_at || '').localeCompare(String(a.created_at || ''));
   });
 }
 
@@ -791,10 +817,189 @@ function refreshDataViews() {
   populateSupervisorFilter();
 }
 
+async function reportExistsRemote(reportId) {
+  const { data, error } = await withTimeout(
+    supabase.from('reports').select('id').eq('id', reportId).maybeSingle(),
+    VERIFY_TIMEOUT_MS,
+    'La verificación del reporte tardó demasiado.'
+  );
+  if (error) throw error;
+  return Boolean(data?.id);
+}
+
+async function photosAlreadyLinked(reportId, uploadedPhotos = []) {
+  if (!uploadedPhotos.length) return true;
+  const { data, error } = await withTimeout(
+    supabase.from('report_photos').select('storage_path').eq('report_id', reportId),
+    VERIFY_TIMEOUT_MS,
+    'La verificación de fotos tardó demasiado.'
+  );
+  if (error) throw error;
+  const existing = new Set((data || []).map((item) => item.storage_path));
+  return uploadedPhotos.every((photo) => existing.has(photo.storage_path));
+}
+
+async function saveReportRecordWithRecovery(payload) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const existsBefore = await reportExistsRemote(payload.id).catch(() => false);
+      if (existsBefore) return { recovered: true };
+
+      const { error } = await withTimeout(
+        supabase.from('reports').insert(payload),
+        REPORT_SAVE_TIMEOUT_MS,
+        'El guardado del reporte tardó demasiado.'
+      );
+      if (error) throw error;
+      return { recovered: false };
+    } catch (error) {
+      if (isDuplicateKeyError(error)) {
+        return { recovered: true };
+      }
+
+      const existsAfter = await reportExistsRemote(payload.id).catch(() => false);
+      if (existsAfter) {
+        return { recovered: true };
+      }
+
+      if (attempt < 3 && isTransientNetworkError(error)) {
+        await sleep(1200 * attempt);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  return { recovered: false };
+}
+
+async function syncPendingReports({ silent = true } = {}) {
+  if (state.syncInProgress) return;
+  if (!state.session?.user) return;
+
+  state.syncInProgress = true;
+  let syncedCount = 0;
+  let hadError = false;
+
+  try {
+    const queue = await getPendingReportsForUser(state.session.user.id);
+    if (!queue.length) return;
+
+    if (!silent && !state.syncToastShown) {
+      state.syncToastShown = true;
+      showToast('Sincronizando reportes pendientes…', false, 2200);
+      setTimeout(() => { state.syncToastShown = false; }, 2500);
+    }
+
+    for (const item of queue) {
+      try {
+        await processPendingReport(item);
+        syncedCount += 1;
+      } catch (error) {
+        hadError = true;
+        await putPendingReport({
+          ...item,
+          attempts: Number(item.attempts || 0) + 1,
+          lastError: String(error?.message || error || 'Error desconocido'),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+  } catch (error) {
+    hadError = true;
+    if (!silent) {
+      showToast(error.message || 'No se pudieron sincronizar los reportes pendientes.', true);
+    }
+  } finally {
+    state.syncInProgress = false;
+    hideUploadProgress();
+  }
+
+  if (syncedCount > 0) {
+    showToast(
+      syncedCount === 1
+        ? 'Reporte sincronizado correctamente.'
+        : `${syncedCount} reportes sincronizados correctamente.`
+    );
+  } else if (!silent && hadError) {
+    showToast('Hay reportes pendientes. Se reintentará cuando haya mejor conexión.', true, 4200);
+  }
+}
+
+async function processPendingReport(record) {
+  let current = { ...record };
+
+  if (!current.reportInserted) {
+    const saveResult = await saveReportRecordWithRecovery(current.payload);
+    current.reportInserted = true;
+    current.lastError = '';
+    current.updatedAt = new Date().toISOString();
+    await putPendingReport(current);
+
+    const reportInState = state.reports.find((item) => item.id === current.id);
+    if (reportInState) {
+      reportInState.__localPending = false;
+      if (saveResult.recovered) reportInState.__recovered = true;
+      refreshDataViews();
+    }
+  }
+
+  const files = Array.isArray(current.files) ? current.files : [];
+  if (files.length) {
+    const uploadedPhotos = Array.isArray(current.uploadedPhotos) ? [...current.uploadedPhotos] : [];
+    showUploadProgress(uploadedPhotos.length, files.length);
+
+    for (let index = uploadedPhotos.length; index < files.length; index += 1) {
+      const uploaded = await uploadSingleFile(current.id, files[index]);
+      uploadedPhotos.push(uploaded);
+      current = {
+        ...current,
+        uploadedPhotos,
+        updatedAt: new Date().toISOString(),
+      };
+      await putPendingReport(current);
+      showUploadProgress(uploadedPhotos.length, files.length);
+    }
+
+    const alreadyLinked = await photosAlreadyLinked(current.id, uploadedPhotos);
+    if (!alreadyLinked && !current.photosLinked) {
+      const { error } = await withTimeout(
+        supabase.from('report_photos').insert(uploadedPhotos),
+        30000,
+        'No se pudieron vincular las fotos al reporte.'
+      );
+      if (error) throw error;
+    }
+
+    current.photosLinked = true;
+    current.updatedAt = new Date().toISOString();
+    await putPendingReport(current);
+  }
+
+  const fullReport = await fetchSingleReport(current.id).catch(() => null);
+  if (fullReport) {
+    fullReport.__localPending = false;
+    upsertReportInState(fullReport);
+    refreshDataViews();
+  } else {
+    const reportInState = state.reports.find((item) => item.id === current.id);
+    if (reportInState) {
+      reportInState.__localPending = false;
+      refreshDataViews();
+    }
+  }
+
+  await deletePendingReport(current.id);
+}
+
 async function handleReportSubmit(event) {
   if (!ensureSupabaseReady()) return;
   event.preventDefault();
-  if (!state.session?.user) return showToast('Necesitás iniciar sesión.', true);
+  if (!state.session?.user) {
+    showToast('Necesitás iniciar sesión.', true);
+    return;
+  }
 
   const form = event.currentTarget;
   const submitBtn = form.querySelector('button[type="submit"]');
@@ -813,14 +1018,17 @@ async function handleReportSubmit(event) {
   try {
     setButtonLoading(submitBtn, true, 'Guardando reporte...');
 
-    const saveResult = await saveReportRecord(payload, reportId);
-
     const optimisticReport = {
       ...payload,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       report_photos: [],
+      __localPending: true,
     };
+
+    const cached = normalizePendingRecord(payload, pendingFiles);
+    await putPendingReport(cached);
+
     upsertReportInState(optimisticReport);
     refreshDataViews();
 
@@ -828,23 +1036,17 @@ async function handleReportSubmit(event) {
     setView('reports');
     showToast(
       pendingFiles.length
-        ? (saveResult.recovered
-            ? 'Reporte guardado. La red respondió tarde, pero quedó registrado. Las fotos se subirán en segundo plano.'
-            : 'Reporte guardado. Las fotos se subirán en segundo plano.')
-        : (saveResult.recovered
-            ? 'Reporte guardado. La red respondió tarde, pero el registro quedó creado.'
-            : 'Reporte guardado correctamente.')
+        ? 'Reporte recibido. Se está enviando y las fotos se subirán en segundo plano.'
+        : 'Reporte recibido. Se está enviando en segundo plano.'
     );
   } catch (error) {
-    showToast(error.message || 'No se pudo guardar el reporte.', true);
+    showToast(error.message || 'No se pudo preparar el reporte.', true);
     return;
   } finally {
     setButtonLoading(submitBtn, false);
   }
 
-  if (pendingFiles.length) {
-    void uploadReportFilesInBackground(reportId, pendingFiles);
-  }
+  void syncPendingReports({ silent: false });
 }
 
 async function handlePasswordUpdate(event) {
@@ -903,8 +1105,8 @@ async function loadAppData() {
     profilesQuery,
   ]);
 
-  if (reportsError) return showToast(reportsError.message, true);
-  if (profilesError) return showToast(profilesError.message, true);
+  if (reportsError) return showToast(reportsError.message || 'No se pudieron cargar los reportes.', true);
+  if (profilesError) return showToast(profilesError.message || 'No se pudieron cargar los perfiles.', true);
 
   state.reports = reports || [];
   state.profiles = profiles || [];
@@ -913,6 +1115,23 @@ async function loadAppData() {
     state.profile = state.profiles.find((profile) => profile.id === state.session.user.id) || null;
     hydrateSessionUI();
   }
+
+  const pending = await getPendingReportsForUser(state.session.user.id).catch(() => []);
+  pending.forEach((item) => {
+    const existing = state.reports.find((report) => report.id === item.id);
+    if (existing) {
+      existing.__localPending = true;
+      return;
+    }
+
+    state.reports.unshift({
+      ...item.payload,
+      created_at: item.createdAt,
+      updated_at: item.updatedAt,
+      report_photos: item.uploadedPhotos || [],
+      __localPending: true,
+    });
+  });
 
   refreshDataViews();
 }
@@ -924,21 +1143,26 @@ function renderDashboard() {
   const supervisors = new Set(state.reports.map((item) => item.supervisor_name).filter(Boolean));
   const photos = state.reports.reduce((acc, item) => acc + (item.report_photos?.length || 0), 0);
 
-  els.statTotalReports.textContent = totalReports;
-  els.statTodayReports.textContent = todayReports;
-  els.statActiveSupervisors.textContent = supervisors.size;
-  els.statPhotos.textContent = photos;
+  if (els.statTotalReports) els.statTotalReports.textContent = String(totalReports);
+  if (els.statTodayReports) els.statTodayReports.textContent = String(todayReports);
+  if (els.statActiveSupervisors) els.statActiveSupervisors.textContent = String(supervisors.size);
+  if (els.statPhotos) els.statPhotos.textContent = String(photos);
 
   const latest = state.reports.slice(0, 5);
-  els.latestReportsList.innerHTML = latest.length
-    ? latest.map((report) => `
-      <article class="list-item">
-        <h4>${escapeHtml(report.service_name)}</h4>
-        <p>${formatDate(report.service_date)} · ${escapeHtml(report.supervisor_name)} · ${escapeHtml(report.location)}</p>
-        <div class="badge ${getBadgeClass(report.service_status)}">${prettifyEnum(report.service_status)}</div>
-      </article>
-    `).join('')
-    : 'Todavía no hay reportes.';
+  if (els.latestReportsList) {
+    els.latestReportsList.innerHTML = latest.length
+      ? latest.map((report) => `
+        <article class="list-item">
+          <h4>${escapeHtml(report.service_name)}</h4>
+          <p>${formatDate(report.service_date)} · ${escapeHtml(report.supervisor_name)} · ${escapeHtml(report.location)}</p>
+          <div class="report-card-meta">
+            <div class="badge ${getBadgeClass(report.service_status)}">${prettifyEnum(report.service_status)}</div>
+            ${report.__localPending ? '<div class="badge warn">Pendiente de sincronización</div>' : ''}
+          </div>
+        </article>
+      `).join('')
+      : 'Todavía no hay reportes.';
+  }
 
   const distribution = state.reports.reduce((acc, item) => {
     acc[item.service_status] = (acc[item.service_status] || 0) + 1;
@@ -946,21 +1170,23 @@ function renderDashboard() {
   }, {});
 
   const entries = Object.entries(distribution).sort((a, b) => b[1] - a[1]);
-  els.qualitySummary.innerHTML = entries.length
-    ? entries.map(([key, value]) => `
-      <div class="quality-row">
-        <span>${prettifyEnum(key)}</span>
-        <strong>${value}</strong>
-      </div>
-    `).join('')
-    : 'Sin datos aún.';
+  if (els.qualitySummary) {
+    els.qualitySummary.innerHTML = entries.length
+      ? entries.map(([key, value]) => `
+        <div class="quality-row">
+          <span>${prettifyEnum(key)}</span>
+          <strong>${value}</strong>
+        </div>
+      `).join('')
+      : 'Sin datos aún.';
+  }
 }
 
 function getFilteredReports() {
-  const from = els.filterFrom.value;
-  const to = els.filterTo.value;
-  const supervisor = els.filterSupervisor.value;
-  const search = els.filterSearch.value.trim().toLowerCase();
+  const from = els.filterFrom?.value || '';
+  const to = els.filterTo?.value || '';
+  const supervisor = els.filterSupervisor?.value || '';
+  const search = (els.filterSearch?.value || '').trim().toLowerCase();
 
   return state.reports.filter((report) => {
     const matchesFrom = !from || report.service_date >= from;
@@ -985,6 +1211,8 @@ function getFilteredReports() {
 
 function renderReportsTable() {
   const rows = getFilteredReports();
+  if (!els.reportsTableWrap) return;
+
   if (!rows.length) {
     els.reportsTableWrap.innerHTML = '<div class="card" style="margin:0; box-shadow:none; border:none;">No hay reportes para esos filtros.</div>';
     return;
@@ -1005,6 +1233,7 @@ function renderReportsTable() {
               <span class="badge ${getBadgeClass(report.incident_level)}">Incidencias: ${prettifyEnum(report.incident_level)}</span>
               <span class="badge ${getBadgeClass(report.attendance_status)}">Cumplimiento del personal: ${prettifyEnum(report.attendance_status)}</span>
               <span class="badge ${getBadgeClass(report.supplies_status)}">Disponibilidad de insumos: ${prettifyEnum(report.supplies_status)}</span>
+              ${report.__localPending ? '<span class="badge warn">Pendiente de sincronización</span>' : ''}
             </div>
           </div>
 
@@ -1055,6 +1284,7 @@ function renderReportsTable() {
 }
 
 function renderUsersTable() {
+  if (!els.usersTableWrap) return;
   if (state.profile?.role !== 'admin') {
     els.usersTableWrap.innerHTML = '';
     return;
@@ -1085,6 +1315,7 @@ function renderUsersTable() {
 }
 
 function renderProfile() {
+  if (!els.profileSummary) return;
   if (!state.profile) {
     els.profileSummary.innerHTML = '<p>Sin datos de perfil.</p>';
     return;
@@ -1099,6 +1330,7 @@ function renderProfile() {
 }
 
 function populateSupervisorFilter() {
+  if (!els.filterSupervisor) return;
   const unique = [...new Set(state.profiles.map((profile) => profile.full_name).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const current = els.filterSupervisor.value;
   els.filterSupervisor.innerHTML = '<option value="">Todos</option>' + unique.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
@@ -1117,7 +1349,10 @@ function downloadFile(filename, content, mimeType) {
 
 function exportReportsCsv() {
   const rows = getFilteredReports();
-  if (!rows.length) return showToast('No hay reportes para exportar.', true);
+  if (!rows.length) {
+    showToast('No hay reportes para exportar.', true);
+    return;
+  }
 
   const header = [
     'fecha', 'supervisor', 'servicio', 'ubicacion', 'turno', 'estado_general',
@@ -1146,13 +1381,19 @@ function exportReportsCsv() {
 
 function exportReportsJson() {
   const rows = getFilteredReports();
-  if (!rows.length) return showToast('No hay reportes para exportar.', true);
+  if (!rows.length) {
+    showToast('No hay reportes para exportar.', true);
+    return;
+  }
   downloadFile(`reportes_${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(rows, null, 2), 'application/json;charset=utf-8;');
 }
 
 function openEditModal(reportId) {
   const report = state.reports.find((item) => item.id === reportId);
-  if (!report) return showToast('No se encontró el reporte.', true);
+  if (!report) {
+    showToast('No se encontró el reporte.', true);
+    return;
+  }
 
   state.editingReportId = reportId;
   const form = els.editReportForm;
@@ -1169,23 +1410,23 @@ function openEditModal(reportId) {
   form.elements.corrective_action.value = report.corrective_action || '';
   form.elements.summary.value = report.summary || '';
   form.elements.observations.value = report.observations || '';
-  els.reportEditModal.showModal();
+  els.reportEditModal?.showModal();
 }
 
 function closeEditModal() {
   state.editingReportId = null;
-  els.editReportForm.reset();
-  els.reportEditModal.close();
+  els.editReportForm?.reset();
+  els.reportEditModal?.close();
 }
 
 function openLightbox(url) {
-  els.lightboxImage.src = url;
-  els.photoLightbox.showModal();
+  if (els.lightboxImage) els.lightboxImage.src = url;
+  els.photoLightbox?.showModal();
 }
 
 function closeLightbox() {
-  els.lightboxImage.src = '';
-  els.photoLightbox.close();
+  if (els.lightboxImage) els.lightboxImage.src = '';
+  els.photoLightbox?.close();
 }
 
 async function handleEditReportSubmit(event) {
@@ -1220,7 +1461,10 @@ async function handleEditReportSubmit(event) {
 async function handleDeleteReport(reportId, button) {
   if (!ensureSupabaseReady()) return;
   const report = state.reports.find((item) => item.id === reportId);
-  if (!report) return showToast('No se encontró el reporte.', true);
+  if (!report) {
+    showToast('No se encontró el reporte.', true);
+    return;
+  }
 
   const confirmed = window.confirm(`Se eliminará el reporte de ${report.service_name} del ${formatDate(report.service_date)}. Esta acción no se puede deshacer.`);
   if (!confirmed) return;
@@ -1244,6 +1488,7 @@ async function handleDeleteReport(reportId, button) {
     if (error) throw error;
 
     removeReportFromState(reportId);
+    await deletePendingReport(reportId).catch(() => {});
     refreshDataViews();
     showToast('Reporte eliminado correctamente.');
   } catch (error) {
@@ -1266,7 +1511,7 @@ function handleReportsActionClick(event) {
   }
 
   if (action === 'delete-report' && reportId) {
-    handleDeleteReport(reportId, actionEl);
+    void handleDeleteReport(reportId, actionEl);
     return;
   }
 
