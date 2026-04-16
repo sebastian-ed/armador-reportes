@@ -626,10 +626,10 @@ function renderReportsTable() {
               <p>Última actualización: ${formatDateTime(report.updated_at || report.created_at)}</p>
             </div>
             <div class="report-card-meta">
-              <span class="badge ${getBadgeClass(report.service_status)}">${prettifyEnum(report.service_status)}</span>
-              <span class="badge ${getBadgeClass(report.incident_level)}">${prettifyEnum(report.incident_level)}</span>
-              <span class="badge ${getBadgeClass(report.attendance_status)}">${prettifyEnum(report.attendance_status)}</span>
-              <span class="badge ${getBadgeClass(report.supplies_status)}">${prettifyEnum(report.supplies_status)}</span>
+              <span class="badge ${getBadgeClass(report.service_status)}">Estado general del servicio: ${prettifyEnum(report.service_status)}</span>
+              <span class="badge ${getBadgeClass(report.incident_level)}">Incidencias: ${prettifyEnum(report.incident_level)}</span>
+              <span class="badge ${getBadgeClass(report.attendance_status)}">Cumplimiento del personal: ${prettifyEnum(report.attendance_status)}</span>
+              <span class="badge ${getBadgeClass(report.supplies_status)}">Disponibilidad de insumos: ${prettifyEnum(report.supplies_status)}</span>
             </div>
           </div>
 
