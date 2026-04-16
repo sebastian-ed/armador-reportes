@@ -135,6 +135,13 @@ function hideUploadProgress() {
   if (bar) bar.classList.add('hidden');
 }
 
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ]);
+}
+
 function formatDate(value) {
   if (!value) return '-';
   return new Date(`${value}T00:00:00`).toLocaleDateString('es-AR');
@@ -491,17 +498,21 @@ function resetReportForm() {
   els.reportSupervisorName.value = state.profile?.full_name || state.session?.user?.email || '';
 }
 
-async function uploadSingleFile(reportId, file, retries = 3) {
+async function uploadSingleFile(reportId, file, retries = 2) {
   const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
   const path = `${state.session.user.id}/${reportId}/${crypto.randomUUID()}.${ext}`;
 
   let lastError;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const { error } = await supabase.storage.from('report-photos').upload(path, file, {
-        upsert: false,
-        contentType: file.type || 'image/jpeg',
-      });
+      const { error } = await withTimeout(
+        supabase.storage.from('report-photos').upload(path, file, {
+          upsert: false,
+          contentType: file.type || 'image/jpeg',
+        }),
+        30000,
+        `La foto "${file.name}" tardó demasiado en subirse.`
+      );
       if (error) throw error;
 
       const { data } = supabase.storage.from('report-photos').getPublicUrl(path);
@@ -509,29 +520,57 @@ async function uploadSingleFile(reportId, file, retries = 3) {
     } catch (err) {
       lastError = err;
       if (attempt < retries) {
-        await new Promise((res) => setTimeout(res, 800 * attempt));
+        await new Promise((res) => setTimeout(res, 1200 * attempt));
       }
     }
   }
   throw lastError;
 }
 
-async function uploadReportFiles(reportId, files = state.pendingFiles, onProgress = null) {
-  if (!files.length) return [];
+async function uploadReportFilesInBackground(reportId, files = []) {
+  if (!files.length) return;
 
-  let done = 0;
-  const uploads = await Promise.all(
-    files.map(async (file) => {
+  const uploaded = [];
+  const failed = [];
+  showUploadProgress(0, files.length);
+
+  for (let index = 0; index < files.length; index++) {
+    const file = files[index];
+    try {
       const result = await uploadSingleFile(reportId, file);
-      done++;
-      if (onProgress) onProgress(done, files.length);
-      return result;
-    })
-  );
+      uploaded.push(result);
+    } catch (error) {
+      failed.push({ file, error });
+    } finally {
+      showUploadProgress(index + 1, files.length);
+    }
+  }
 
-  const { error: photosError } = await supabase.from('report_photos').insert(uploads);
-  if (photosError) throw photosError;
-  return uploads;
+  if (uploaded.length) {
+    const { error: photosError } = await withTimeout(
+      supabase.from('report_photos').insert(uploaded),
+      15000,
+      'Las fotos se subieron, pero el registro tardó demasiado en confirmarse.'
+    );
+    if (photosError) throw photosError;
+  }
+
+  const fullReport = await fetchSingleReport(reportId);
+  upsertReportInState(fullReport);
+  refreshDataViews();
+  hideUploadProgress();
+
+  if (failed.length && uploaded.length) {
+    showToast(`Reporte guardado. Se subieron ${uploaded.length} foto(s) y fallaron ${failed.length}.`, true);
+    return;
+  }
+
+  if (failed.length) {
+    showToast(`Reporte guardado. No se pudieron subir ${failed.length} foto(s).`, true);
+    return;
+  }
+
+  showToast('Fotos guardadas correctamente.');
 }
 
 async function fetchSingleReport(reportId) {
@@ -589,39 +628,38 @@ async function handleReportSubmit(event) {
   try {
     const pendingFiles = [...state.pendingFiles];
 
-    // Paso 1: guardar el reporte
     setButtonLoading(submitBtn, true, 'Guardando reporte...');
-    const { data, error } = await supabase.from('reports').insert(payload).select().single();
+    const { data, error } = await withTimeout(
+      supabase.from('reports').insert(payload).select().single(),
+      15000,
+      'El guardado del reporte tardó demasiado. Revisá tu conexión e intentá nuevamente.'
+    );
     if (error) throw error;
 
-    // Resetear formulario inmediatamente para liberar memoria de archivos
-    resetReportForm();
+    const optimisticReport = {
+      ...data,
+      ...payload,
+      report_photos: [],
+      created_at: data.created_at || new Date().toISOString(),
+      updated_at: data.updated_at || data.created_at || new Date().toISOString(),
+    };
 
-    // Paso 2: subir fotos si hay, mantener boton bloqueado con progreso visible
+    upsertReportInState(optimisticReport);
+    refreshDataViews();
+    resetReportForm();
+    setView('reports');
+    setButtonLoading(submitBtn, false);
+
     if (pendingFiles.length) {
-      showUploadProgress(0, pendingFiles.length);
-      setButtonLoading(submitBtn, true, `Subiendo fotos (0/${pendingFiles.length})...`);
-      try {
-        await uploadReportFiles(data.id, pendingFiles, (done, total) => {
-          showUploadProgress(done, total);
-          setButtonLoading(submitBtn, true, `Subiendo fotos (${done}/${total})...`);
-        });
-        hideUploadProgress();
-        showToast('Reporte y fotos guardados correctamente.');
-      } catch (uploadError) {
+      showToast(`Reporte guardado. Subiendo ${pendingFiles.length} foto(s) en segundo plano...`);
+      uploadReportFilesInBackground(data.id, pendingFiles).catch((uploadError) => {
         hideUploadProgress();
         showToast(`Reporte guardado. Error al subir fotos: ${uploadError.message}`, true);
-      }
-    } else {
-      showToast('Reporte guardado correctamente.');
+      });
+      return;
     }
 
-    // Paso 3: refrescar datos y navegar
-    const fullReport = await fetchSingleReport(data.id);
-    upsertReportInState(fullReport);
-    refreshDataViews();
-    setView('reports');
-
+    showToast('Reporte guardado correctamente.');
   } catch (error) {
     showToast(error.message, true);
   } finally {
