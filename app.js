@@ -61,6 +61,11 @@ const els = {
   toast: document.getElementById('toast'),
 };
 
+
+const IMAGE_COMPRESSION_THRESHOLD = 1.2 * 1024 * 1024;
+const IMAGE_MAX_DIMENSION = 1600;
+const IMAGE_JPEG_QUALITY = 0.78;
+
 const viewMeta = {
   auth: ['Acceso', 'Ingresá o creá tu cuenta para operar la plataforma.'],
   dashboard: ['Dashboard', 'Monitoreo ejecutivo de reportes, fotos y supervisión.'],
@@ -351,77 +356,74 @@ async function handleSignup(event) {
 }
 
 async function handleFilesSelected(event) {
-  const files = [...event.target.files];
+  const input = event.currentTarget;
+  const files = [...(input.files || [])];
   if (!files.length) return;
 
-  const input = event.target;
-  input.disabled = true;
-
   try {
-    const processedFiles = [];
-    for (const file of files) {
-      processedFiles.push(await prepareUploadFile(file));
-    }
-    state.pendingFiles = [...state.pendingFiles, ...processedFiles];
+    const preparedFiles = await prepareSelectedFiles(files);
+    state.pendingFiles = [...state.pendingFiles, ...preparedFiles];
     renderPhotoPreview();
-    showToast(processedFiles.length === 1 ? 'Foto lista para adjuntar.' : 'Fotos listas para adjuntar.');
   } catch (error) {
     showToast(`No se pudieron preparar las fotos: ${error.message}`, true);
   } finally {
-    input.disabled = false;
     input.value = '';
   }
 }
 
-async function prepareUploadFile(file) {
-  const isImage = String(file.type || '').startsWith('image/');
-  if (!isImage) return file;
-  if (file.size <= IMAGE_COMPRESSION_THRESHOLD) return file;
-
-  try {
-    return await compressImageFile(file);
-  } catch (error) {
-    console.warn('No se pudo comprimir la imagen. Se sube el original.', error);
-    return file;
+async function prepareSelectedFiles(files) {
+  const prepared = [];
+  for (const file of files) {
+    if (!file.type || !file.type.startsWith('image/')) {
+      prepared.push(file);
+      continue;
+    }
+    prepared.push(await optimizeImageFile(file));
   }
+  return prepared;
 }
 
-function loadImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('No se pudo leer la imagen.'));
-    };
-    img.src = url;
-  });
-}
+async function optimizeImageFile(file) {
+  const needsCompression = file.size > IMAGE_COMPRESSION_THRESHOLD;
+  if (!needsCompression) return file;
 
-async function compressImageFile(file) {
-  const img = await loadImageFromFile(file);
-  const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(img.width, img.height));
-  const width = Math.max(1, Math.round(img.width * scale));
-  const height = Math.max(1, Math.round(img.height * scale));
+  const image = await loadImageElement(file);
+  const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+  const targetWidth = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+  const targetHeight = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d', { alpha: false });
-  ctx.drawImage(img, 0, 0, width, height);
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return file;
+  ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
 
-  const blob = await new Promise((resolve, reject) => {
-    canvas.toBlob((result) => {
-      if (result) resolve(result);
-      else reject(new Error('No se pudo generar la compresión de la foto.'));
-    }, 'image/jpeg', IMAGE_JPEG_QUALITY);
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob(resolve, 'image/jpeg', IMAGE_JPEG_QUALITY);
   });
 
-  const compressedName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
-  return new File([blob], compressedName, { type: 'image/jpeg', lastModified: Date.now() });
+  if (!blob || blob.size >= file.size) return file;
+
+  const baseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
+  return new File([blob], `${baseName}.jpg`, {
+    type: 'image/jpeg',
+    lastModified: Date.now(),
+  });
+}
+
+async function loadImageElement(file) {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('No se pudo leer la imagen seleccionada.'));
+      img.src = objectUrl;
+    });
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  }
 }
 
 function renderPhotoPreview() {
@@ -528,28 +530,28 @@ async function handleReportSubmit(event) {
     const { data, error } = await supabase.from('reports').insert(payload).select().single();
     if (error) throw error;
 
-    const optimisticReport = { ...data, report_photos: [] };
-    upsertReportInState(optimisticReport);
+    const fullReport = await fetchSingleReport(data.id);
+    upsertReportInState(fullReport);
     resetReportForm();
     refreshDataViews();
     setView('reports');
     showToast(pendingFiles.length
-      ? 'Reporte guardado. Las fotos se están procesando en segundo plano.'
+      ? 'Reporte guardado. Se están cargando las fotos en segundo plano.'
       : 'Reporte guardado correctamente.');
 
-    void (async () => {
-      try {
-        if (pendingFiles.length) {
+    if (pendingFiles.length) {
+      void (async () => {
+        try {
           await uploadReportFiles(data.id, pendingFiles);
+          const updatedReport = await fetchSingleReport(data.id);
+          upsertReportInState(updatedReport);
+          refreshDataViews();
           showToast('Fotos cargadas correctamente.');
+        } catch (uploadError) {
+          showToast(`El reporte se guardó, pero falló la carga de fotos: ${uploadError.message}`, true);
         }
-        const updatedReport = await fetchSingleReport(data.id);
-        upsertReportInState(updatedReport);
-        refreshDataViews();
-      } catch (uploadError) {
-        showToast(`El reporte se guardó, pero falló la carga de fotos: ${uploadError.message}`, true);
-      }
-    })();
+      })();
+    }
   } catch (error) {
     showToast(error.message, true);
   } finally {
