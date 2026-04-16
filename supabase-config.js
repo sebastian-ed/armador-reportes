@@ -3,7 +3,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const SUPABASE_URL = 'https://jwgrwnogsgdqqmfpqhwj.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ';
 
-if (SUPABASE_URL.includes('REEMPLAZAR') || SUPABASE_ANON_KEY.includes('REEMPLAZAR')) {
+if (SUPABASE_URL.includes('https://jwgrwnogsgdqqmfpqhwj.supabase.co') || SUPABASE_ANON_KEY.includes('sb_publishable_nWpY61fucjXBFA8LI8rM0w_y5uc0KCQ')) {
   console.warn('Configurá SUPABASE_URL y SUPABASE_ANON_KEY en supabase-config.js antes de usar la app.');
 }
 
