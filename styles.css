@@ -407,3 +407,39 @@ textarea { resize: vertical; }
   white-space: nowrap;
   border: 0;
 }
+
+#uploadProgressBar {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(340px, calc(100vw - 32px));
+  background: #0f172a;
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 16px 36px rgba(2, 8, 23, .28);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#uploadProgressBar.hidden { display: none !important; }
+#uploadProgressTrack {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.15);
+  overflow: hidden;
+}
+#uploadProgressInner {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width .35s ease;
+  width: 0%;
+}
+#uploadProgressLabel {
+  color: rgba(255,255,255,.85);
+  font-size: .88rem;
+  font-weight: 600;
+  text-align: center;
+}
