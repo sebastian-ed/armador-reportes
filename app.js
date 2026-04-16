@@ -1,7 +1,7 @@
-import { supabase, supabaseConfigError } from './supabase-config.js';
+import { supabase, supabaseConfigError, isSupabaseConfigured } from './supabase-config.js';
 
 const state = {
-  configOk: !!supabase,
+  configOk: !!isSupabaseConfigured,
   session: null,
   profile: null,
   reports: [],
@@ -72,13 +72,13 @@ const viewMeta = {
 
 
 function ensureSupabaseReady() {
-  if (supabase) return true;
+  if (isSupabaseConfigured && supabase && !supabase.__isStub) return true;
   showToast(supabaseConfigError || 'Falta configurar Supabase.', true);
   return false;
 }
 
 function renderConfigError() {
-  if (supabase) return;
+  if (isSupabaseConfigured && supabase && !supabase.__isStub) return;
   const card = document.createElement('article');
   card.className = 'card';
   card.innerHTML = `
