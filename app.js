@@ -1516,60 +1516,125 @@ function buildPrintableReportsHtml(reports, title, subtitle) {
         </header>
         ${cards}
       </div>
-      <script>
-        (() => {
-          const triggerPrint = () => setTimeout(() => window.print(), 250);
-          const images = Array.from(document.images || []);
-          let fired = false;
-          const finish = () => {
-            if (fired) return;
-            fired = true;
-            triggerPrint();
-          };
-          if (!images.length) {
-            finish();
-          } else {
-            let remaining = images.filter((img) => !img.complete).length;
-            if (!remaining) {
-              finish();
-            } else {
-              const timeout = setTimeout(finish, 5000);
-              images.forEach((img) => {
-                if (img.complete) return;
-                const done = () => {
-                  remaining -= 1;
-                  if (remaining <= 0) {
-                    clearTimeout(timeout);
-                    finish();
-                  }
-                };
-                img.addEventListener('load', done, { once: true });
-                img.addEventListener('error', done, { once: true });
-              });
-            }
-          }
-          window.onafterprint = () => window.close();
-        })();
-      <\/script>
     </body>
   </html>`;
 }
 
+function waitForDocumentImages(documentRef, timeoutMs = 7000) {
+  return new Promise((resolve) => {
+    const images = Array.from(documentRef?.images || []).filter((img) => img?.src);
+    if (!images.length) {
+      resolve();
+      return;
+    }
+
+    let remaining = images.filter((img) => !img.complete).length;
+    if (!remaining) {
+      resolve();
+      return;
+    }
+
+    const timeout = setTimeout(resolve, timeoutMs);
+    const done = () => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    };
+
+    images.forEach((img) => {
+      if (img.complete) return;
+      img.addEventListener('load', done, { once: true });
+      img.addEventListener('error', done, { once: true });
+    });
+  });
+}
+
+function removePrintFrame(frame) {
+  if (!frame) return;
+  try {
+    frame.remove();
+  } catch {}
+}
+
 function openPrintWindow(html, title) {
-  const printWindow = window.open('', '_blank', 'noopener,noreferrer');
-  if (!printWindow) {
-    showToast('El navegador bloqueó la ventana de impresión. Habilitá pop-ups para esta app.', true, 4500);
-    return false;
-  }
-  printWindow.document.open();
-  printWindow.document.write(html);
-  printWindow.document.close();
-  if (title) {
-    try {
-      printWindow.document.title = title;
-    } catch {}
-  }
-  return true;
+  return new Promise((resolve) => {
+    const frame = document.createElement('iframe');
+    frame.setAttribute('aria-hidden', 'true');
+    frame.style.position = 'fixed';
+    frame.style.right = '0';
+    frame.style.bottom = '0';
+    frame.style.width = '1px';
+    frame.style.height = '1px';
+    frame.style.border = '0';
+    frame.style.opacity = '0.01';
+    frame.style.pointerEvents = 'none';
+    frame.style.background = 'transparent';
+
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+
+    const fail = () => {
+      removePrintFrame(frame);
+      finish(false);
+    };
+
+    frame.onload = async () => {
+      try {
+        const frameWindow = frame.contentWindow;
+        const frameDocument = frame.contentDocument || frameWindow?.document;
+        if (!frameWindow || !frameDocument) {
+          fail();
+          return;
+        }
+
+        if (title) {
+          try {
+            frameDocument.title = title;
+          } catch {}
+        }
+
+        await waitForDocumentImages(frameDocument, 8000);
+
+        const cleanup = () => setTimeout(() => removePrintFrame(frame), 800);
+        const handleAfterPrint = () => {
+          frameWindow.removeEventListener('afterprint', handleAfterPrint);
+          cleanup();
+        };
+
+        frameWindow.addEventListener('afterprint', handleAfterPrint, { once: true });
+        setTimeout(() => {
+          try {
+            frameWindow.focus();
+            frameWindow.print();
+            finish(true);
+          } catch {
+            cleanup();
+            finish(false);
+          }
+        }, 280);
+
+        setTimeout(cleanup, 60000);
+      } catch {
+        fail();
+      }
+    };
+
+    frame.onerror = fail;
+    document.body.appendChild(frame);
+    frame.srcdoc = html;
+
+    setTimeout(() => {
+      if (!settled && !frame.contentWindow) {
+        fail();
+      }
+    }, 2000);
+  });
 }
 
 function exportReportsPdf({ scope = 'filtered', reportId = '' } = {}) {
@@ -1602,10 +1667,13 @@ function exportReportsPdf({ scope = 'filtered', reportId = '' } = {}) {
   }
 
   const html = buildPrintableReportsHtml(rows, title, subtitle);
-  const opened = openPrintWindow(html, `${title} ${today}`.trim());
-  if (opened) {
-    showToast(rows.length === 1 ? 'Se abrió el reporte para imprimir o guardar en PDF.' : `Se abrieron ${rows.length} reportes para imprimir o guardar en PDF.`);
-  }
+  openPrintWindow(html, `${title} ${today}`.trim()).then((opened) => {
+    if (opened) {
+      showToast(rows.length === 1 ? 'Se abrió el diálogo de impresión para imprimir o guardar en PDF.' : `Se prepararon ${rows.length} reportes para imprimir o guardar en PDF.`);
+      return;
+    }
+    showToast('No se pudo abrir la impresión. Probá de nuevo desde el mismo botón.', true, 4500);
+  });
 }
 
 function renderReportsTable() {
