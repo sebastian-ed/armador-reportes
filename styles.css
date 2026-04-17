@@ -311,6 +311,52 @@ textarea { resize: vertical; }
   justify-content: flex-end;
 }
 
+.report-bulk-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #f8fafc;
+  flex-wrap: wrap;
+}
+.selection-summary {
+  color: var(--muted);
+  font-weight: 600;
+}
+.report-card.is-selected {
+  border-color: rgba(15, 118, 110, .45);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, .08);
+}
+.report-card-title-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: flex-start;
+  gap: 14px;
+}
+.report-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f8fafc;
+  white-space: nowrap;
+}
+.report-selector input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+.report-selector span {
+  font-weight: 700;
+  font-size: .9rem;
+}
+
 .modal, .lightbox {
   border: none;
   padding: 0;
@@ -385,7 +431,7 @@ textarea { resize: vertical; }
   .stats-grid, .auth-grid, .two-col, .filters-grid, .form-grid, .report-grid {
     grid-template-columns: 1fr;
   }
-  .upload-box, .modal-head, .report-card-head { flex-direction: column; align-items: stretch; }
+  .upload-box, .modal-head, .report-card-head, .report-bulk-bar { flex-direction: column; align-items: stretch; }
   .form-actions, .report-actions { justify-content: stretch; }
   .form-actions .btn, .inline-actions .btn, .upload-actions .btn, .topbar-actions .btn, .report-actions .btn, .modal-actions .btn { width: 100%; }
   .sidebar { padding: 16px; }
@@ -393,6 +439,7 @@ textarea { resize: vertical; }
   .report-grid-list { padding: 12px; }
   .report-card { padding: 14px; }
   .photo-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .report-card-title-row { grid-template-columns: 1fr; }
 }
 
 

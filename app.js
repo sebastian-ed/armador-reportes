@@ -12,6 +12,7 @@ const state = {
   objectUrls: [],
   syncInProgress: false,
   syncToastShown: false,
+  selectedReportIds: new Set(),
 };
 
 const els = {
@@ -56,6 +57,11 @@ const els = {
   filterTo: document.getElementById('filterTo'),
   filterSupervisor: document.getElementById('filterSupervisor'),
   filterSearch: document.getElementById('filterSearch'),
+  reportSelectionSummary: document.getElementById('reportSelectionSummary'),
+  selectFilteredBtn: document.getElementById('selectFilteredBtn'),
+  clearSelectionBtn: document.getElementById('clearSelectionBtn'),
+  exportFilteredPdfBtn: document.getElementById('exportFilteredPdfBtn'),
+  exportSelectedPdfBtn: document.getElementById('exportSelectedPdfBtn'),
   exportCsvBtn: document.getElementById('exportCsvBtn'),
   exportJsonBtn: document.getElementById('exportJsonBtn'),
   statTotalReports: document.getElementById('statTotalReports'),
@@ -490,12 +496,17 @@ function bindEvents() {
   els.filterTo?.addEventListener('input', renderReportsTable);
   els.filterSupervisor?.addEventListener('change', renderReportsTable);
   els.filterSearch?.addEventListener('input', renderReportsTable);
+  els.selectFilteredBtn?.addEventListener('click', selectFilteredReports);
+  els.clearSelectionBtn?.addEventListener('click', clearReportSelection);
+  els.exportFilteredPdfBtn?.addEventListener('click', () => exportReportsPdf({ scope: 'filtered' }));
+  els.exportSelectedPdfBtn?.addEventListener('click', () => exportReportsPdf({ scope: 'selected' }));
   els.exportCsvBtn?.addEventListener('click', exportReportsCsv);
   els.exportJsonBtn?.addEventListener('click', exportReportsJson);
   els.closeEditModalBtn?.addEventListener('click', closeEditModal);
   els.cancelEditModalBtn?.addEventListener('click', closeEditModal);
   els.closeLightboxBtn?.addEventListener('click', closeLightbox);
   els.reportsTableWrap?.addEventListener('click', handleReportsActionClick);
+  els.reportsTableWrap?.addEventListener('change', handleReportsSelectionChange);
   window.addEventListener('online', () => void syncPendingReports({ silent: false }));
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
@@ -807,9 +818,11 @@ function upsertReportInState(report) {
 
 function removeReportFromState(reportId) {
   state.reports = state.reports.filter((item) => item.id !== reportId);
+  state.selectedReportIds.delete(reportId);
 }
 
 function refreshDataViews() {
+  sanitizeSelectedReportIds();
   renderDashboard();
   renderReportsTable();
   renderUsersTable();
@@ -1209,8 +1222,395 @@ function getFilteredReports() {
   });
 }
 
+function sanitizeSelectedReportIds() {
+  const validIds = new Set(state.reports.map((report) => report.id));
+  [...state.selectedReportIds].forEach((reportId) => {
+    if (!validIds.has(reportId)) {
+      state.selectedReportIds.delete(reportId);
+    }
+  });
+}
+
+function getSelectedReports() {
+  return state.reports.filter((report) => state.selectedReportIds.has(report.id));
+}
+
+function getActiveFiltersSummary() {
+  const parts = [];
+  if (els.filterFrom?.value || els.filterTo?.value) {
+    const from = els.filterFrom?.value ? formatDate(els.filterFrom.value) : 'inicio';
+    const to = els.filterTo?.value ? formatDate(els.filterTo.value) : 'hoy';
+    parts.push(`Fechas: ${from} a ${to}`);
+  }
+  if (els.filterSupervisor?.value) {
+    parts.push(`Supervisor: ${els.filterSupervisor.value}`);
+  }
+  if (els.filterSearch?.value?.trim()) {
+    parts.push(`Búsqueda: ${els.filterSearch.value.trim()}`);
+  }
+  return parts.length ? parts.join(' · ') : 'Sin filtros aplicados';
+}
+
+function renderSelectionSummary(filteredRows = getFilteredReports()) {
+  if (!els.reportSelectionSummary) return;
+  const selectedCount = getSelectedReports().length;
+  const filteredCount = filteredRows.length;
+  const filtersText = getActiveFiltersSummary();
+  els.reportSelectionSummary.textContent = `${selectedCount} seleccionados · ${filteredCount} filtrados · ${filtersText}`;
+}
+
+function selectFilteredReports() {
+  const rows = getFilteredReports();
+  if (!rows.length) {
+    showToast('No hay reportes filtrados para seleccionar.', true);
+    return;
+  }
+  rows.forEach((report) => state.selectedReportIds.add(report.id));
+  renderReportsTable();
+  showToast(rows.length === 1 ? '1 reporte filtrado seleccionado.' : `${rows.length} reportes filtrados seleccionados.`);
+}
+
+function clearReportSelection() {
+  if (!state.selectedReportIds.size) {
+    renderSelectionSummary();
+    return;
+  }
+  state.selectedReportIds.clear();
+  renderReportsTable();
+  showToast('Selección limpiada.');
+}
+
+function buildPrintableReportsHtml(reports, title, subtitle) {
+  const cards = reports.map((report, index) => `
+    <section class="print-report ${index < reports.length - 1 ? 'page-break' : ''}">
+      <header class="print-report-head">
+        <div>
+          <h2>${escapeHtml(report.service_name || 'Reporte')}</h2>
+          <p>${formatDate(report.service_date)} · ${escapeHtml(report.location || '-')} · ${escapeHtml(report.supervisor_name || '-')}</p>
+          <p>Última actualización: ${formatDateTime(report.updated_at || report.created_at)}</p>
+        </div>
+        <div class="print-badges">
+          <span class="print-badge">Estado general: ${escapeHtml(prettifyEnum(report.service_status))}</span>
+          <span class="print-badge">Incidencias: ${escapeHtml(prettifyEnum(report.incident_level))}</span>
+          <span class="print-badge">Personal: ${escapeHtml(prettifyEnum(report.attendance_status))}</span>
+          <span class="print-badge">Insumos: ${escapeHtml(prettifyEnum(report.supplies_status))}</span>
+        </div>
+      </header>
+
+      <div class="print-grid">
+        <article class="print-panel">
+          <h3>Resumen ejecutivo</h3>
+          <p>${escapeHtml(report.summary || '-').replace(/\n/g, '<br>')}</p>
+        </article>
+
+        ${report.observations
+          ? `<article class="print-panel"><h3>Observaciones</h3><p>${escapeHtml(report.observations).replace(/\n/g, '<br>')}</p></article>`
+          : ''}
+
+        <article class="print-panel">
+          <h3>Detalle operativo</h3>
+          <ul>
+            <li><strong>Turno:</strong> ${escapeHtml(prettifyEnum(report.shift))}</li>
+            <li><strong>Acción correctiva:</strong> ${escapeHtml(prettifyEnum(report.corrective_action))}</li>
+            <li><strong>Fotos adjuntas:</strong> ${(report.report_photos || []).length}</li>
+          </ul>
+        </article>
+      </div>
+
+      <section class="print-photos-section">
+        <h3>Evidencia fotográfica</h3>
+        ${(report.report_photos || []).length
+          ? `<div class="print-photos">${(report.report_photos || []).map((photo, photoIndex) => `
+              <figure class="print-photo-card">
+                <img src="${photo.public_url}" alt="Foto ${photoIndex + 1} del reporte" />
+                <figcaption>Foto ${photoIndex + 1}</figcaption>
+              </figure>
+            `).join('')}</div>`
+          : '<div class="print-empty">Sin fotos adjuntas.</div>'}
+      </section>
+    </section>
+  `).join('');
+
+  return `<!doctype html>
+  <html lang="es">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>${escapeHtml(title)}</title>
+      <style>
+        :root {
+          color-scheme: light;
+          --line: #dbe3ef;
+          --ink: #0f172a;
+          --muted: #475569;
+          --soft: #f8fafc;
+          --brand: #0f766e;
+        }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          font-family: Inter, Arial, sans-serif;
+          color: var(--ink);
+          background: #fff;
+          padding: 28px;
+        }
+        .print-shell {
+          max-width: 1040px;
+          margin: 0 auto;
+        }
+        .print-header {
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          padding: 22px;
+          margin-bottom: 20px;
+          background: var(--soft);
+        }
+        .print-header h1 {
+          margin: 0 0 6px;
+          font-size: 26px;
+        }
+        .print-header p {
+          margin: 4px 0;
+          color: var(--muted);
+        }
+        .print-report {
+          border: 1px solid var(--line);
+          border-radius: 20px;
+          padding: 22px;
+          margin-bottom: 18px;
+          page-break-inside: avoid;
+        }
+        .print-report-head {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+          margin-bottom: 16px;
+          flex-wrap: wrap;
+        }
+        .print-report-head h2 {
+          margin: 0 0 6px;
+          font-size: 22px;
+        }
+        .print-report-head p {
+          margin: 4px 0;
+          color: var(--muted);
+        }
+        .print-badges {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .print-badge {
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 7px 10px;
+          font-size: 12px;
+          font-weight: 700;
+          background: #fff;
+        }
+        .print-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+          margin-bottom: 16px;
+        }
+        .print-panel {
+          border: 1px solid var(--line);
+          border-radius: 16px;
+          padding: 16px;
+          background: #fff;
+        }
+        .print-panel h3, .print-photos-section h3 {
+          margin: 0 0 10px;
+          font-size: 16px;
+        }
+        .print-panel p {
+          margin: 0;
+          line-height: 1.55;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
+        .print-panel ul {
+          margin: 0;
+          padding-left: 18px;
+          line-height: 1.55;
+        }
+        .print-photos-section {
+          border: 1px solid var(--line);
+          border-radius: 16px;
+          padding: 16px;
+          background: var(--soft);
+        }
+        .print-photos {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .print-photo-card {
+          margin: 0;
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          overflow: hidden;
+          background: #fff;
+          page-break-inside: avoid;
+        }
+        .print-photo-card img {
+          display: block;
+          width: 100%;
+          height: auto;
+          max-height: 420px;
+          object-fit: contain;
+          background: #fff;
+        }
+        .print-photo-card figcaption {
+          padding: 10px 12px;
+          font-size: 12px;
+          color: var(--muted);
+        }
+        .print-empty {
+          color: var(--muted);
+          font-style: italic;
+        }
+        .page-break {
+          page-break-after: always;
+        }
+        @page {
+          size: A4;
+          margin: 14mm;
+        }
+        @media print {
+          body {
+            padding: 0;
+          }
+          .print-shell {
+            max-width: none;
+          }
+          .print-report,
+          .print-header,
+          .print-panel,
+          .print-photos-section,
+          .print-photo-card {
+            box-shadow: none;
+          }
+        }
+        @media (max-width: 860px) {
+          body {
+            padding: 16px;
+          }
+          .print-grid,
+          .print-photos {
+            grid-template-columns: 1fr;
+          }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="print-shell">
+        <header class="print-header">
+          <h1>${escapeHtml(title)}</h1>
+          <p>${escapeHtml(subtitle)}</p>
+          <p>Total de reportes: ${reports.length}</p>
+          <p>Generado: ${new Date().toLocaleString('es-AR')}</p>
+        </header>
+        ${cards}
+      </div>
+      <script>
+        (() => {
+          const triggerPrint = () => setTimeout(() => window.print(), 250);
+          const images = Array.from(document.images || []);
+          let fired = false;
+          const finish = () => {
+            if (fired) return;
+            fired = true;
+            triggerPrint();
+          };
+          if (!images.length) {
+            finish();
+          } else {
+            let remaining = images.filter((img) => !img.complete).length;
+            if (!remaining) {
+              finish();
+            } else {
+              const timeout = setTimeout(finish, 5000);
+              images.forEach((img) => {
+                if (img.complete) return;
+                const done = () => {
+                  remaining -= 1;
+                  if (remaining <= 0) {
+                    clearTimeout(timeout);
+                    finish();
+                  }
+                };
+                img.addEventListener('load', done, { once: true });
+                img.addEventListener('error', done, { once: true });
+              });
+            }
+          }
+          window.onafterprint = () => window.close();
+        })();
+      <\/script>
+    </body>
+  </html>`;
+}
+
+function openPrintWindow(html, title) {
+  const printWindow = window.open('', '_blank', 'noopener,noreferrer');
+  if (!printWindow) {
+    showToast('El navegador bloqueó la ventana de impresión. Habilitá pop-ups para esta app.', true, 4500);
+    return false;
+  }
+  printWindow.document.open();
+  printWindow.document.write(html);
+  printWindow.document.close();
+  if (title) {
+    try {
+      printWindow.document.title = title;
+    } catch {}
+  }
+  return true;
+}
+
+function exportReportsPdf({ scope = 'filtered', reportId = '' } = {}) {
+  let rows = [];
+  let title = 'Reportes de supervisión';
+  let subtitle = getActiveFiltersSummary();
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (scope === 'single') {
+    const report = state.reports.find((item) => item.id === reportId);
+    if (!report) {
+      showToast('No se encontró el reporte seleccionado.', true);
+      return;
+    }
+    rows = [report];
+    title = `Reporte ${report.service_name || ''}`.trim();
+    subtitle = `${formatDate(report.service_date)} · ${report.supervisor_name || '-'} · ${report.location || '-'}`;
+  } else if (scope === 'selected') {
+    rows = getSelectedReports();
+    title = 'Reportes seleccionados';
+    subtitle = `${getActiveFiltersSummary()} · Seleccionados manualmente`;
+  } else {
+    rows = getFilteredReports();
+    title = 'Reportes filtrados';
+  }
+
+  if (!rows.length) {
+    showToast(scope === 'selected' ? 'No hay reportes seleccionados para imprimir.' : 'No hay reportes para imprimir con esos filtros.', true);
+    return;
+  }
+
+  const html = buildPrintableReportsHtml(rows, title, subtitle);
+  const opened = openPrintWindow(html, `${title} ${today}`.trim());
+  if (opened) {
+    showToast(rows.length === 1 ? 'Se abrió el reporte para imprimir o guardar en PDF.' : `Se abrieron ${rows.length} reportes para imprimir o guardar en PDF.`);
+  }
+}
+
 function renderReportsTable() {
   const rows = getFilteredReports();
+  renderSelectionSummary(rows);
   if (!els.reportsTableWrap) return;
 
   if (!rows.length) {
@@ -1220,65 +1620,75 @@ function renderReportsTable() {
 
   els.reportsTableWrap.innerHTML = `
     <div class="report-grid-list">
-      ${rows.map((report) => `
-        <article class="report-card" data-report-id="${report.id}">
-          <div class="report-card-head">
-            <div>
-              <h4>${escapeHtml(report.service_name)}</h4>
-              <p>${formatDate(report.service_date)} · ${escapeHtml(report.location)} · ${escapeHtml(report.supervisor_name)}</p>
-              <p>Última actualización: ${formatDateTime(report.updated_at || report.created_at)}</p>
-            </div>
-            <div class="report-card-meta">
-              <span class="badge ${getBadgeClass(report.service_status)}">Estado general del servicio: ${prettifyEnum(report.service_status)}</span>
-              <span class="badge ${getBadgeClass(report.incident_level)}">Incidencias: ${prettifyEnum(report.incident_level)}</span>
-              <span class="badge ${getBadgeClass(report.attendance_status)}">Cumplimiento del personal: ${prettifyEnum(report.attendance_status)}</span>
-              <span class="badge ${getBadgeClass(report.supplies_status)}">Disponibilidad de insumos: ${prettifyEnum(report.supplies_status)}</span>
-              ${report.__localPending ? '<span class="badge warn">Pendiente de sincronización</span>' : ''}
-            </div>
-          </div>
-
-          <div class="report-card-body">
-            <div class="report-card-text">
-              <div class="report-card-text-block">
-                <strong>Resumen ejecutivo</strong>
-                <div>${escapeHtml(report.summary)}</div>
-              </div>
-              ${report.observations ? `
-                <div class="report-card-text-block">
-                  <strong>Observaciones</strong>
-                  <div>${escapeHtml(report.observations)}</div>
+      ${rows.map((report) => {
+        const isSelected = state.selectedReportIds.has(report.id);
+        return `
+          <article class="report-card ${isSelected ? 'is-selected' : ''}" data-report-id="${report.id}">
+            <div class="report-card-head">
+              <div class="report-card-title-row">
+                <label class="report-selector">
+                  <input type="checkbox" data-action="select-report" data-report-id="${report.id}" ${isSelected ? 'checked' : ''} />
+                  <span>Seleccionar</span>
+                </label>
+                <div>
+                  <h4>${escapeHtml(report.service_name)}</h4>
+                  <p>${formatDate(report.service_date)} · ${escapeHtml(report.location)} · ${escapeHtml(report.supervisor_name)}</p>
+                  <p>Última actualización: ${formatDateTime(report.updated_at || report.created_at)}</p>
                 </div>
-              ` : ''}
-              <div class="report-card-text-block">
-                <strong>Detalle operativo</strong>
-                <div>Turno: ${escapeHtml(prettifyEnum(report.shift))}</div>
-                <div>Acción correctiva: ${escapeHtml(prettifyEnum(report.corrective_action))}</div>
-                <div>Fotos adjuntas: ${(report.report_photos || []).length}</div>
+              </div>
+              <div class="report-card-meta">
+                <span class="badge ${getBadgeClass(report.service_status)}">Estado general del servicio: ${prettifyEnum(report.service_status)}</span>
+                <span class="badge ${getBadgeClass(report.incident_level)}">Incidencias: ${prettifyEnum(report.incident_level)}</span>
+                <span class="badge ${getBadgeClass(report.attendance_status)}">Cumplimiento del personal: ${prettifyEnum(report.attendance_status)}</span>
+                <span class="badge ${getBadgeClass(report.supplies_status)}">Disponibilidad de insumos: ${prettifyEnum(report.supplies_status)}</span>
+                ${report.__localPending ? '<span class="badge warn">Pendiente de sincronización</span>' : ''}
               </div>
             </div>
 
-            <div>
-              ${(report.report_photos || []).length
-                ? `
-                  <div class="photo-gallery">
-                    ${report.report_photos.map((photo, idx) => `
-                      <div class="photo-thumb">
-                        <img src="${photo.public_url}" alt="Foto ${idx + 1} del reporte" data-action="open-photo" data-photo-url="${photo.public_url}" />
-                        <span>Foto ${idx + 1}</span>
-                      </div>
-                    `).join('')}
+            <div class="report-card-body">
+              <div class="report-card-text">
+                <div class="report-card-text-block">
+                  <strong>Resumen ejecutivo</strong>
+                  <div>${escapeHtml(report.summary)}</div>
+                </div>
+                ${report.observations ? `
+                  <div class="report-card-text-block">
+                    <strong>Observaciones</strong>
+                    <div>${escapeHtml(report.observations)}</div>
                   </div>
-                `
-                : '<div class="report-card-text-block"><strong>Fotos</strong><div>Sin fotos adjuntas.</div></div>'}
-            </div>
-          </div>
+                ` : ''}
+                <div class="report-card-text-block">
+                  <strong>Detalle operativo</strong>
+                  <div>Turno: ${escapeHtml(prettifyEnum(report.shift))}</div>
+                  <div>Acción correctiva: ${escapeHtml(prettifyEnum(report.corrective_action))}</div>
+                  <div>Fotos adjuntas: ${(report.report_photos || []).length}</div>
+                </div>
+              </div>
 
-          <div class="report-actions">
-            <button type="button" class="btn btn-secondary btn-sm" data-action="edit-report" data-report-id="${report.id}">Editar</button>
-            <button type="button" class="btn btn-danger btn-sm" data-action="delete-report" data-report-id="${report.id}">Eliminar</button>
-          </div>
-        </article>
-      `).join('')}
+              <div>
+                ${(report.report_photos || []).length
+                  ? `
+                    <div class="photo-gallery">
+                      ${report.report_photos.map((photo, idx) => `
+                        <div class="photo-thumb">
+                          <img src="${photo.public_url}" alt="Foto ${idx + 1} del reporte" data-action="open-photo" data-photo-url="${photo.public_url}" />
+                          <span>Foto ${idx + 1}</span>
+                        </div>
+                      `).join('')}
+                    </div>
+                  `
+                  : '<div class="report-card-text-block"><strong>Fotos</strong><div>Sin fotos adjuntas.</div></div>'}
+              </div>
+            </div>
+
+            <div class="report-actions">
+              <button type="button" class="btn btn-primary btn-sm" data-action="pdf-report" data-report-id="${report.id}">Imprimir / PDF</button>
+              <button type="button" class="btn btn-secondary btn-sm" data-action="edit-report" data-report-id="${report.id}">Editar</button>
+              <button type="button" class="btn btn-danger btn-sm" data-action="delete-report" data-report-id="${report.id}">Eliminar</button>
+            </div>
+          </article>
+        `;
+      }).join('')}
     </div>
   `;
 }
@@ -1498,12 +1908,33 @@ async function handleDeleteReport(reportId, button) {
   }
 }
 
+function handleReportsSelectionChange(event) {
+  const input = event.target.closest('[data-action="select-report"]');
+  if (!input) return;
+  const reportId = input.dataset.reportId;
+  if (!reportId) return;
+
+  if (input.checked) {
+    state.selectedReportIds.add(reportId);
+  } else {
+    state.selectedReportIds.delete(reportId);
+  }
+  renderSelectionSummary();
+  const card = input.closest('.report-card');
+  card?.classList.toggle('is-selected', input.checked);
+}
+
 function handleReportsActionClick(event) {
   const actionEl = event.target.closest('[data-action]');
   if (!actionEl) return;
 
   const action = actionEl.dataset.action;
   const reportId = actionEl.dataset.reportId;
+
+  if (action === 'pdf-report' && reportId) {
+    exportReportsPdf({ scope: 'single', reportId });
+    return;
+  }
 
   if (action === 'edit-report' && reportId) {
     openEditModal(reportId);

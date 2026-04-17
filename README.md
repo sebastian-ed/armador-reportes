@@ -10,13 +10,14 @@ Aplicación web estática, lista para GitHub Pages, conectada a Supabase para:
 - uso desde celular con opción de abrir cámara
 - historial con filtros por fecha, supervisor y texto libre
 - exportación de reportes a CSV y JSON
+- impresión o guardado en PDF de un reporte, varios seleccionados o todo lo filtrado
 - cambio de contraseña desde panel interno
 
 ## Estructura
 
 - `index.html` → interfaz principal
 - `styles.css` → diseño responsive y profesional
-- `app.js` → lógica de autenticación, reportes, filtros y exportación
+- `app.js` → lógica de autenticación, reportes, filtros, selección múltiple y exportación
 - `supabase-config.js` → configuración del proyecto Supabase
 - `schema.sql` → tablas, bucket, triggers y políticas RLS
 
@@ -88,8 +89,25 @@ Las fotos se guardan en el bucket público `report-photos` y también quedan vin
 - evidencia fotográfica unificada
 - filtrado operativo rápido
 - descarga de reportes
+- salida lista para imprimir o guardar en PDF desde botones del historial
 - móvil y escritorio
 - panel personal para contraseña
+
+## Uso de impresión / PDF
+
+Desde **Reportes** ahora tenés tres caminos:
+
+- **Imprimir / PDF** dentro de cada tarjeta → saca un reporte puntual
+- **Imprimir / PDF filtrados** → toma exactamente lo que quedó visible por fechas, supervisor o búsqueda
+- **Imprimir / PDF seleccionados** → toma solo los reportes tildados manualmente
+
+La salida abre el diálogo de impresión del navegador. Ahí podés:
+
+- imprimir en papel
+- o elegir **Guardar como PDF**
+
+Eso evita meter librerías pesadas de PDF y mantiene mejor calidad en textos largos, fotos y saltos de página.
+
 
 ## Recomendación de negocio
 

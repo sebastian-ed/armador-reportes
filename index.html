@@ -276,8 +276,18 @@
               <p>Consulta, filtros, exportación y descarga de evidencias.</p>
             </div>
             <div class="inline-actions">
+              <button id="exportFilteredPdfBtn" class="btn btn-primary">Imprimir / PDF filtrados</button>
+              <button id="exportSelectedPdfBtn" class="btn btn-secondary">Imprimir / PDF seleccionados</button>
               <button id="exportCsvBtn" class="btn btn-secondary">Exportar CSV</button>
               <button id="exportJsonBtn" class="btn btn-secondary">Exportar JSON</button>
+            </div>
+          </div>
+
+          <div id="reportBulkBar" class="report-bulk-bar">
+            <div id="reportSelectionSummary" class="selection-summary">0 seleccionados · 0 filtrados</div>
+            <div class="inline-actions">
+              <button id="selectFilteredBtn" type="button" class="btn btn-secondary btn-sm">Seleccionar filtrados</button>
+              <button id="clearSelectionBtn" type="button" class="btn btn-ghost btn-sm">Limpiar selección</button>
             </div>
           </div>
 
